@@ -1,0 +1,4248 @@
+from OpenGL.GL import *
+from OpenGL.GLUT import *
+from OpenGL.GLU import *
+import math
+import random
+
+camera_angle = 0
+camera_distance = 1000
+fovY = 60
+monsters = []
+powerups = []
+arena = None
+statue = None
+player = None
+spawn_timer = 0
+spawn_interval = 2.0
+powerup_spawn_timer = 0
+powerup_spawn_interval = 15.0
+game_over = False
+first_person_mode = False
+game_timer = 180.0
+game_won = False
+game_over = False
+timer_paused = False
+fence = None
+horse = None
+companions = []
+MAX_COMPANIONS = 4
+barriers = []
+spikes = []
+bombs = []
+game_paused = False
+sudden_death_active = False
+boss_spawn_timer = 0
+boss_spawn_interval = 8.0
+max_bosses = 7
+
+
+class Arena:
+
+    def __init__(self, length=900):
+        self.length = length
+        self.full_size = length * 2
+
+        self.grid_spacing = 100
+        self.grid_line_width = 1
+        self.boundary_line_width = 3
+
+        self.tiles = self._generate_terrain_tiles()
+
+        self.colors = {
+            'normal': {
+                'floor': (0.2, 0.2, 0.25),
+                'grid': (0.3, 0.3, 0.35),
+                'boundary': (0.5, 0.5, 0.6),
+                'ambient': (0.15, 0.15, 0.2)
+            },
+            'last_stand': {
+                'floor': (0.3, 0.0, 0.0),
+                'grid': (0.5, 0.1, 0.1),
+                'boundary': (1.0, 0.0, 0.0),
+                'ambient': (0.3, 0.0, 0.0)
+            },
+            'victory': {
+                'floor': (0.0, 0.3, 0.2),
+                'grid': (0.1, 0.5, 0.4),
+                'boundary': (0.0, 1.0, 0.5),
+                'ambient': (0.0, 0.25, 0.15)
+            }
+        }
+
+        self.current_state = 'normal'
+        self.animation_time = 0
+
+        self.warning_zones = {
+            'top': {'active': False, 'intensity': 0.0},
+            'bottom': {'active': False, 'intensity': 0.0},
+            'left': {'active': False, 'intensity': 0.0},
+            'right': {'active': False, 'intensity': 0.0}
+        }
+
+    def _generate_terrain_tiles(self):
+        tiles = []
+        tile_size = 100
+        num_tiles = int(self.length * 2 / tile_size)
+
+        terrain_types = {
+            'grass': [(0.2, 0.4, 0.2), (0.25, 0.45, 0.22), (0.3, 0.5, 0.25), (0.22, 0.42, 0.21)],
+            'dirt': [(0.4, 0.3, 0.2), (0.45, 0.32, 0.22), (0.38, 0.28, 0.18), (0.42, 0.31, 0.21)],
+            'stone': [(0.35, 0.35, 0.35), (0.4, 0.4, 0.4), (0.3, 0.3, 0.3), (0.37, 0.37, 0.37)],
+            'sand': [(0.55, 0.5, 0.35), (0.6, 0.55, 0.4), (0.5, 0.45, 0.3), (0.57, 0.52, 0.37)]
+        }
+
+        for i in range(num_tiles):
+            for j in range(num_tiles):
+                x = -self.length + (i * tile_size)
+                y = -self.length + (j * tile_size)
+
+                rand_val = random.random()
+                if rand_val < 0.5:
+                    terrain_type = 'grass'
+                elif rand_val < 0.75:
+                    terrain_type = 'dirt'
+                elif rand_val < 0.9:
+                    terrain_type = 'stone'
+                else:
+                    terrain_type = 'sand'
+
+                color = random.choice(terrain_types[terrain_type])
+                color = (
+                    max(0, min(1, color[0] + random.uniform(-0.05, 0.05))),
+                    max(0, min(1, color[1] + random.uniform(-0.05, 0.05))),
+                    max(0, min(1, color[2] + random.uniform(-0.05, 0.05)))
+                )
+
+                tiles.append({'x': x, 'y': y, 'size': tile_size, 'color': color, 'type': terrain_type})
+
+        return tiles
+
+    def update(self, delta_time=0.05):
+        self.animation_time += delta_time
+        for zone in self.warning_zones.values():
+            if zone['active']:
+                zone['intensity'] = min(1.0, zone['intensity'] + 0.1)
+            else:
+                zone['intensity'] = max(0.0, zone['intensity'] - 0.05)
+
+    def set_state(self, state):
+        if state in self.colors:
+            self.current_state = state
+
+    def activate_warning_zone(self, edge):
+        if edge in self.warning_zones:
+            self.warning_zones[edge]['active'] = True
+
+    def deactivate_warning_zone(self, edge):
+        if edge in self.warning_zones:
+            self.warning_zones[edge]['active'] = False
+
+    def draw_floor(self):
+        for tile in self.tiles:
+            x, y = tile['x'], tile['y']
+            size = tile['size']
+            color = tile['color']
+
+            if self.current_state == 'last_stand':
+                color = (min(1.0, color[0] + 0.3), max(0.0, color[1] - 0.1), max(0.0, color[2] - 0.1))
+            elif self.current_state == 'victory':
+                color = (max(0.0, color[0] - 0.05), min(1.0, color[1] + 0.2), min(1.0, color[2] + 0.1))
+
+            glBegin(GL_QUADS)
+            glColor3f(*color)
+            glVertex3f(x, y, 0)
+            glVertex3f(x + size, y, 0)
+            glVertex3f(x + size, y + size, 0)
+            glVertex3f(x, y + size, 0)
+            glEnd()
+
+        self._draw_battle_damage()
+
+    def _draw_battle_damage(self):
+        random.seed(42)
+        num_craters = 15
+        for _ in range(num_craters):
+            x = random.uniform(-self.length + 100, self.length - 100)
+            y = random.uniform(-self.length + 100, self.length - 100)
+            radius = random.uniform(15, 35)
+
+            glColor3f(0.15, 0.1, 0.08)
+            glBegin(GL_TRIANGLES)
+            segments = 16
+            for i in range(segments):
+                angle1 = 2.0 * math.pi * i / segments
+                angle2 = 2.0 * math.pi * (i + 1) / segments
+
+
+                cx1 = x + radius * math.cos(angle1)
+                cy1 = y + radius * math.sin(angle1)
+
+
+                cx2 = x + radius * math.cos(angle2)
+                cy2 = y + radius * math.sin(angle2)
+
+
+                glVertex3f(x, y, 0.2)
+                glVertex3f(cx1, cy1, 0.2)
+                glVertex3f(cx2, cy2, 0.2)
+            glEnd()
+        random.seed()
+
+    def draw_grid(self):
+        glColor3f(0.2, 0.2, 0.2)
+        half_width = self.grid_line_width / 2.0
+
+        for i in range(-self.length, self.length + 1, self.grid_spacing):
+            glBegin(GL_QUADS)
+            glVertex3f(i - half_width, -self.length, 1)
+            glVertex3f(i + half_width, -self.length, 1)
+            glVertex3f(i + half_width, self.length, 1)
+            glVertex3f(i - half_width, self.length, 1)
+            glEnd()
+
+
+        for i in range(-self.length, self.length + 1, self.grid_spacing):
+            glBegin(GL_QUADS)
+            glVertex3f(-self.length, i - half_width, 1)
+            glVertex3f(self.length, i - half_width, 1)
+            glVertex3f(self.length, i + half_width, 1)
+            glVertex3f(-self.length, i + half_width, 1)
+            glEnd()
+
+    def draw_boundaries(self):
+        colors = self.colors[self.current_state]
+
+        if self.current_state == 'last_stand':
+
+            pulse = 0.5 + 0.5 * abs(math.sin(self.animation_time * 3))
+            glColor3f(1.0 * pulse, 0.0, 0.0)
+            line_width = 8
+        else:
+            glColor3f(*colors['boundary'])
+            line_width = self.boundary_line_width
+
+        half_width = line_width / 2.0
+        z = 2
+
+
+        glBegin(GL_QUADS)
+
+
+        glVertex3f(-self.length, -self.length - half_width, z)
+        glVertex3f(self.length, -self.length - half_width, z)
+        glVertex3f(self.length, -self.length + half_width, z)
+        glVertex3f(-self.length, -self.length + half_width, z)
+
+
+        glVertex3f(self.length - half_width, -self.length, z)
+        glVertex3f(self.length + half_width, -self.length, z)
+        glVertex3f(self.length + half_width, self.length, z)
+        glVertex3f(self.length - half_width, self.length, z)
+
+
+        glVertex3f(self.length, self.length - half_width, z)
+        glVertex3f(-self.length, self.length - half_width, z)
+        glVertex3f(-self.length, self.length + half_width, z)
+        glVertex3f(self.length, self.length + half_width, z)
+
+
+        glVertex3f(-self.length - half_width, self.length, z)
+        glVertex3f(-self.length + half_width, self.length, z)
+        glVertex3f(-self.length + half_width, -self.length, z)
+        glVertex3f(-self.length - half_width, -self.length, z)
+
+        glEnd()
+
+        self._draw_corner_posts()
+
+    def _draw_corner_posts(self):
+        post_positions = [(-self.length, -self.length), (self.length, -self.length),
+                         (self.length, self.length), (-self.length, self.length)]
+        for x, y in post_positions:
+            glColor3f(0.3, 0.25, 0.2)
+            glBegin(GL_QUADS)
+            post_size = 15
+            glVertex3f(x - post_size, y - post_size, 2)
+            glVertex3f(x + post_size, y - post_size, 2)
+            glVertex3f(x + post_size, y + post_size, 2)
+            glVertex3f(x - post_size, y + post_size, 2)
+            glEnd()
+
+    def draw_warning_zones(self):
+        for edge, data in self.warning_zones.items():
+            if data['intensity'] > 0:
+                self._draw_edge_warning(edge, data['intensity'])
+
+    def _draw_edge_warning(self, edge, intensity):
+        pulse = 0.5 + 0.5 * abs(math.sin(self.animation_time * 5))
+        alpha = intensity * pulse * 0.5
+
+
+        glColor3f(1.0, 0.2, 0.0)
+        line_width = 12
+        half_width = line_width / 2.0
+        margin = 5
+        z = 3
+
+        glBegin(GL_QUADS)
+        if edge == 'top':
+            glVertex3f(-self.length + margin, self.length - margin - half_width, z)
+            glVertex3f(self.length - margin, self.length - margin - half_width, z)
+            glVertex3f(self.length - margin, self.length - margin + half_width, z)
+            glVertex3f(-self.length + margin, self.length - margin + half_width, z)
+        elif edge == 'bottom':
+            glVertex3f(-self.length + margin, -self.length + margin - half_width, z)
+            glVertex3f(self.length - margin, -self.length + margin - half_width, z)
+            glVertex3f(self.length - margin, -self.length + margin + half_width, z)
+            glVertex3f(-self.length + margin, -self.length + margin + half_width, z)
+        elif edge == 'left':
+            glVertex3f(-self.length + margin - half_width, -self.length + margin, z)
+            glVertex3f(-self.length + margin + half_width, -self.length + margin, z)
+            glVertex3f(-self.length + margin + half_width, self.length - margin, z)
+            glVertex3f(-self.length + margin - half_width, self.length - margin, z)
+        else:
+            glVertex3f(self.length - margin - half_width, -self.length + margin, z)
+            glVertex3f(self.length - margin + half_width, -self.length + margin, z)
+            glVertex3f(self.length - margin + half_width, self.length - margin, z)
+            glVertex3f(self.length - margin - half_width, self.length - margin, z)
+        glEnd()
+
+    def draw_center_marker(self):
+        glPushMatrix()
+        glTranslatef(0, 0, 0.5)
+        glColor3f(0.4, 0.4, 0.42)
+
+        glBegin(GL_TRIANGLES)
+        segments = 32
+        radius = 50
+        for i in range(segments):
+            angle1 = 2.0 * math.pi * i / segments
+            angle2 = 2.0 * math.pi * (i + 1) / segments
+
+            x1 = radius * math.cos(angle1)
+            y1 = radius * math.sin(angle1)
+            x2 = radius * math.cos(angle2)
+            y2 = radius * math.sin(angle2)
+
+            glVertex3f(0, 0, 0)
+            glVertex3f(x1, y1, 0)
+            glVertex3f(x2, y2, 0)
+        glEnd()
+        glPopMatrix()
+
+    def draw(self):
+        self.draw_floor()
+        self.draw_grid()
+        self.draw_boundaries()
+        self.draw_warning_zones()
+        self.draw_center_marker()
+
+
+class Statue:
+    def __init__(self, x=0, y=0, z=0, scale=0.5):
+        self.x = x
+        self.y = y
+        self.z = z
+        self.actual_z = 5
+        self.scale = scale
+        self.animation_time = 0
+        self.current_state = 'normal'
+        self.statue_color = (0.82, 0.78, 0.70)
+        self.pedestal_color = (0.85, 0.80, 0.65)
+        self.alive = True
+
+        self.health = 500
+        self.max_health = 500
+        self.shield_active = False
+        self.shield_health = 0
+        self.max_shield_health = 100
+        self.shield_color = (0.0, 1.0, 0.0)
+        self.shield_pulse = 0
+
+
+
+    def update(self, delta_time=0.05):
+        self.animation_time += delta_time
+
+        if self.health <= 0:
+            self.current_state = 'victory'
+        elif self.health <= 200:
+            self.current_state = 'last_stand'
+        else:
+            self.current_state = 'normal'
+
+    def set_state(self, state):
+        if state in ['normal', 'last_stand', 'victory']:
+            self.current_state = state
+
+    def take_damage(self, damage):
+        self.health -= damage
+        if self.health < 0:
+            self.health = 0
+            self.alive = False
+        print(f"Statue took {damage} damage! Health: {self.health}/{self.max_health}")
+
+    def draw(self):
+        glPushMatrix()
+        glTranslatef(self.x, self.y, self.actual_z)
+        glScalef(self.scale, self.scale, self.scale)
+
+        self._draw_pedestal()
+        self._draw_body()
+        self._draw_arms()
+        self._draw_head()
+        self._draw_spear()
+        self._draw_shield()
+        self._draw_aura()
+        self._draw_health_bar()
+        self._draw_protective_shield()
+
+        glPopMatrix()
+
+    def _draw_health_bar(self):
+        glPushMatrix()
+
+        glTranslatef(0, 0, 280)
+        bar_width = 200
+        bar_height = 20
+        bar_depth = 8
+
+        health_percent = self.health / self.max_health
+
+
+        glPushMatrix()
+        glColor3f(0.2, 0.2, 0.2)
+        glScalef(bar_width, bar_depth, bar_height)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        border_thickness = 1.5
+        glColor3f(0.4, 0.4, 0.4)
+        glPushMatrix()
+        glTranslatef(0, 0, bar_height/2)
+        glScalef(bar_width, bar_depth, border_thickness)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(0, 0, -bar_height/2)
+        glScalef(bar_width, bar_depth, border_thickness)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(-bar_width/2, 0, 0)
+        glScalef(border_thickness, bar_depth, bar_height)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(bar_width/2, 0, 0)
+        glScalef(border_thickness, bar_depth, bar_height)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        current_width = bar_width * health_percent
+
+        if health_percent > 0.5:
+            r = 2.0 * (1.0 - health_percent)
+            g = 1.0
+            b = 0.0
+        else:
+            r = 1.0
+            g = 2.0 * health_percent
+            b = 0.0
+
+        glPushMatrix()
+        offset = -(bar_width - current_width) / 2
+        glTranslatef(offset, 0, 0)
+        glColor3f(r, g, b)
+        glScalef(current_width, bar_depth - 2, bar_height - 4)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        glPopMatrix()
+
+    def _draw_pedestal(self):
+        glPushMatrix()
+        glColor3f(*self.pedestal_color)
+        glTranslatef(0, 0, 20)
+        glPushMatrix()
+        glScalef(1.3, 1.3, 0.4)
+        glutSolidCube(80)
+        glPopMatrix()
+        glTranslatef(0, 0, 18)
+        glPushMatrix()
+        glScalef(1.1, 1.1, 0.3)
+        glutSolidCube(70)
+        glPopMatrix()
+        glTranslatef(0, 0, 15)
+        glColor3f(0.88, 0.83, 0.68)
+        glPushMatrix()
+        glScalef(1.0, 1.0, 0.35)
+        glutSolidCube(65)
+        glPopMatrix()
+        glPopMatrix()
+
+    def _draw_body(self):
+        glPushMatrix()
+        glTranslatef(0, 0, 53)
+        glColor3f(*self.statue_color)
+        glPushMatrix()
+        glScalef(1.0, 0.7, 1.8)
+        gluCylinder(gluNewQuadric(), 25, 18, 45, 20, 20)
+        glPopMatrix()
+        glTranslatef(0, 0, 45)
+        glPushMatrix()
+        glScalef(0.9, 0.65, 1.2)
+        gluCylinder(gluNewQuadric(), 20, 18, 35, 20, 20)
+        glPopMatrix()
+        glTranslatef(0, 0, 35)
+        glColor3f(0.75, 0.68, 0.50)
+        glPushMatrix()
+        glScalef(1.0, 0.6, 0.3)
+        glutSolidCube(35)
+        glPopMatrix()
+        glTranslatef(0, 0, 15)
+        glColor3f(*self.statue_color)
+        glPushMatrix()
+        glScalef(1.1, 0.6, 1.3)
+        glutSolidCube(32)
+        glPopMatrix()
+        glPopMatrix()
+
+    def _draw_arms(self):
+        glPushMatrix()
+        glTranslatef(0, 0, 148)
+        shoulder_height = 20
+
+        for x_offset in [-20, 20]:
+            glPushMatrix()
+            glTranslatef(x_offset, 0, shoulder_height)
+            glColor3f(0.75, 0.70, 0.60)
+            gluSphere(gluNewQuadric(), 10, 14, 14)
+            glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(-20, 0, shoulder_height)
+        glRotatef(25, 1, 0, 0)
+        glRotatef(10, 0, 1, 0)
+        glColor3f(*self.statue_color)
+        gluCylinder(gluNewQuadric(), 7, 6, 40, 16, 16)
+        glTranslatef(0, 0, 40)
+        gluSphere(gluNewQuadric(), 7, 12, 12)
+        glRotatef(-35, 1, 0, 0)
+        gluCylinder(gluNewQuadric(), 6.5, 5.5, 35, 16, 16)
+        glTranslatef(0, 0, 35)
+        gluSphere(gluNewQuadric(), 7, 12, 12)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(20, 0, shoulder_height)
+        glRotatef(-60, 1, 0, 0)
+        glRotatef(-20, 0, 1, 0)
+        glColor3f(*self.statue_color)
+        gluCylinder(gluNewQuadric(), 7, 6, 40, 16, 16)
+        glTranslatef(0, 0, 40)
+        gluSphere(gluNewQuadric(), 7, 12, 12)
+        glRotatef(-25, 1, 0, 0)
+        gluCylinder(gluNewQuadric(), 6.5, 5.5, 35, 16, 16)
+        glTranslatef(0, 0, 35)
+        gluSphere(gluNewQuadric(), 7, 12, 12)
+        glPopMatrix()
+        glPopMatrix()
+
+    def _draw_head(self):
+        glPushMatrix()
+        glTranslatef(0, 0, 187)
+        glColor3f(*self.statue_color)
+        gluCylinder(gluNewQuadric(), 6, 7, 14, 16, 16)
+        glTranslatef(0, 0, 14)
+        glColor3f(0.85, 0.82, 0.75)
+        gluSphere(gluNewQuadric(), 16, 20, 20)
+        glTranslatef(0, 0, 12)
+        glColor3f(0.78, 0.70, 0.45)
+        gluSphere(gluNewQuadric(), 17, 18, 18)
+        glTranslatef(0, 0, 8)
+        glColor3f(0.82, 0.65, 0.35)
+        gluCylinder(gluNewQuadric(), 6, 8, 25, 16, 16)
+        glTranslatef(0, 0, 25)
+        gluCylinder(gluNewQuadric(), 8, 2, 15, 16, 16)
+        glPopMatrix()
+
+    def _draw_spear(self):
+        glPushMatrix()
+        glTranslatef(30, -10, 90)
+        glRotatef(-30, 1, 0, 0)
+        glRotatef(-10, 0, 1, 0)
+        glColor3f(0.45, 0.35, 0.25)
+        gluCylinder(gluNewQuadric(), 3.5, 3.5, 200, 16, 16)
+        glTranslatef(0, 0, 200)
+        glColor3f(0.75, 0.75, 0.78)
+        gluCylinder(gluNewQuadric(), 6, 4, 20, 16, 16)
+        glColor3f(0.85, 0.85, 0.88)
+        gluCylinder(gluNewQuadric(), 10, 0, 50, 16, 16)
+        glPopMatrix()
+
+    def _draw_shield(self):
+        glPushMatrix()
+        glTranslatef(-28, -8, 230)
+        glRotatef(90, 0, 1, 0)
+        glRotatef(15, 1, 0, 0)
+
+        glColor3f(0.65, 0.60, 0.50)
+        gluCylinder(gluNewQuadric(), 35, 35, 8, 24, 24)
+
+        glPushMatrix()
+        glColor3f(0.70, 0.62, 0.48)
+        glScalef(1.0, 1.0, 0.1)
+        gluSphere(gluNewQuadric(), 35, 24, 24)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(0, 0, 8)
+        glColor3f(0.60, 0.55, 0.45)
+        glScalef(1.0, 1.0, 0.1)
+        gluSphere(gluNewQuadric(), 35, 24, 24)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(0, 0, 4)
+        glColor3f(0.80, 0.72, 0.50)
+        gluSphere(gluNewQuadric(), 12, 16, 16)
+        glPopMatrix()
+
+        glColor3f(0.75, 0.68, 0.55)
+        for i in range(8):
+            angle = i * 45
+            rad = math.radians(angle)
+            x = math.cos(rad) * 30
+            y = math.sin(rad) * 30
+
+            glPushMatrix()
+            glTranslatef(x, y, 0)
+            gluCylinder(gluNewQuadric(), 2, 2, 8, 8, 8)
+            glPopMatrix()
+        glPopMatrix()
+
+    def _draw_aura(self):
+        glPushMatrix()
+        glTranslatef(0, 0, 130)
+
+        if self.current_state == 'last_stand':
+            pulse = 0.5 + 0.5 * abs(math.sin(self.animation_time * 3))
+            glColor3f(1.0 * 0.35 * pulse, 0.3 * 0.35 * pulse, 0.2 * 0.35 * pulse)
+            gluSphere(gluNewQuadric(), 50, 20, 20)
+        elif self.current_state == 'victory':
+            pulse = 0.5 + 0.5 * abs(math.sin(self.animation_time * 2))
+            glColor3f(0.3 * 0.35 * pulse, 1.0 * 0.35 * pulse, 0.7 * 0.35 * pulse)
+            gluSphere(gluNewQuadric(), 50, 20, 20)
+        glPopMatrix()
+
+    def _draw_protective_shield(self):
+        if not self.shield_active or self.shield_health <= 0:
+            return
+
+        glPushMatrix()
+        glTranslatef(0, 0, 5)
+
+        shield_percent = self.shield_health / self.max_shield_health
+        if shield_percent > 0.6:
+            self.shield_color = (0.0, 1.0, 0.3)
+        elif shield_percent > 0.3:
+            self.shield_color = (1.0, 1.0, 0.0)
+        else:
+            self.shield_color = (1.0, 0.3, 0.0)
+
+        self.shield_pulse = 0.7 + 0.3 * abs(math.sin(self.animation_time * 3))
+
+
+        glPushMatrix()
+        glRotatef(90, 1, 0, 0)
+        glColor3f(self.shield_color[0] * self.shield_pulse * 0.4,
+                self.shield_color[1] * self.shield_pulse * 0.4,
+                self.shield_color[2] * self.shield_pulse * 0.4)
+
+        gluCylinder(gluNewQuadric(), 70, 85, 1, 32, 2)
+        glPopMatrix()
+
+
+        glPushMatrix()
+        glTranslatef(0, 0, 40)
+        glColor3f(self.shield_color[0] * self.shield_pulse * 0.25,
+                self.shield_color[1] * self.shield_pulse * 0.25,
+                self.shield_color[2] * self.shield_pulse * 0.25)
+        gluSphere(gluNewQuadric(), 80, 20, 20)
+        glPopMatrix()
+
+        for i in range(8):
+            angle = (self.animation_time * 2 + i * 45) % 360
+            rad = math.radians(angle)
+            x = math.cos(rad) * 78
+            y = math.sin(rad) * 78
+            z = abs(math.sin(self.animation_time * 2 + i)) * 60
+
+            glPushMatrix()
+            glTranslatef(x, y, z)
+            glColor3f(*self.shield_color)
+            gluSphere(gluNewQuadric(), 3, 8, 8)
+            glPopMatrix()
+
+        glPopMatrix()
+
+    def take_shield_damage(self, damage):
+        if self.shield_active and self.shield_health > 0:
+            self.shield_health -= damage
+            if self.shield_health < 0:
+                self.shield_health = 0
+                self.shield_active = False
+                print("Shield DESTROYED!")
+            else:
+                print(f"Shield absorbed {damage} damage! Shield: {self.shield_health}/{self.max_shield_health}")
+            return True
+        return False
+
+
+class Monster:
+
+    def __init__(self, x, y, z):
+        self.x = x
+        self.y = y
+        self.z = z
+        self.health = 100
+        self.max_health = 100
+        self.size = 15
+        self.animation_time = 0
+        self.alive = True
+        self.player_ref = None
+        self.body_color = (0.15, 0.1, 0.3)
+        self.horn_color = (0.2, 0.1, 0.35)
+        self.eye_color = (0.5, 0.0, 0.8)
+        self.pupil_color = (1.0, 0.0, 1.0)
+        self.mouth_color = (0.05, 0.0, 0.1)
+        self.arm_color = (0.12, 0.08, 0.25)
+
+    def update(self):
+
+        self.animation_time += 0.05
+
+    def draw(self):
+
+        if not self.alive:
+            return
+
+        glPushMatrix()
+        glTranslatef(self.x, self.y, self.z)
+        bob_offset = math.sin(self.animation_time * 2) * 5
+        glTranslatef(0, 0, bob_offset)
+
+
+        self._draw_body()
+        self._draw_horns()
+        self._draw_eyes()
+        self._draw_mouth()
+        self._draw_arms()
+        self._draw_floating_wisps()
+        self._draw_health_bar()
+
+        glPopMatrix()
+
+    def _draw_body(self):
+
+        glColor3f(*self.body_color)
+        gluSphere(gluNewQuadric(), self.size, 20, 20)
+
+        glPushMatrix()
+        glTranslatef(-self.size * 0.3, self.size * 0.3, self.size * 0.4)
+        glColor3f(0.4, 0.3, 0.5)
+        gluSphere(gluNewQuadric(), self.size * 0.25, 12, 12)
+        glPopMatrix()
+
+    def _draw_horns(self):
+
+        glColor3f(*self.horn_color)
+
+        glPushMatrix()
+        glTranslatef(-self.size * 0.5, 0, self.size * 0.8)
+        glRotatef(-25, 0, 1, 0)
+        glRotatef(10, 1, 0, 0)
+        gluCylinder(gluNewQuadric(), self.size * 0.15, self.size * 0.05, self.size * 0.6, 12, 12)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(self.size * 0.5, 0, self.size * 0.8)
+        glRotatef(25, 0, 1, 0)
+        glRotatef(10, 1, 0, 0)
+        gluCylinder(gluNewQuadric(), self.size * 0.15, self.size * 0.05, self.size * 0.6, 12, 12)
+        glPopMatrix()
+
+    def _draw_eyes(self):
+
+        eye_glow = 0.7 + 0.3 * abs(math.sin(self.animation_time * 4))
+        eye_size = self.size * 0.15
+        pupil_size = self.size * 0.075
+
+        eye_positions = [
+            (-self.size * 0.3, self.size * 0.4, self.size * 0.3),
+            (self.size * 0.3, self.size * 0.4, self.size * 0.3),
+            (-self.size * 0.3, self.size * 0.4, self.size * 0.05),
+            (self.size * 0.3, self.size * 0.4, self.size * 0.05)
+        ]
+
+        for pos in eye_positions:
+            glPushMatrix()
+            glTranslatef(*pos)
+
+            glColor3f(self.eye_color[0] * eye_glow,
+                     self.eye_color[1] * eye_glow,
+                     self.eye_color[2] * eye_glow)
+            gluSphere(gluNewQuadric(), eye_size, 12, 12)
+
+            glTranslatef(0, eye_size * 0.5, 0)
+            glColor3f(self.pupil_color[0] * eye_glow,
+                     self.pupil_color[1] * eye_glow,
+                     self.pupil_color[2] * eye_glow)
+            gluSphere(gluNewQuadric(), pupil_size, 10, 10)
+
+            glPopMatrix()
+
+    def _draw_mouth(self):
+        glPushMatrix()
+        glTranslatef(0, self.size * 0.45, self.size * 0.15)
+        glColor3f(*self.mouth_color)
+        glScalef(0.8, 0.3, 0.5)
+        glutSolidCube(self.size * 0.4)
+        glPopMatrix()
+
+    def _draw_arms(self):
+
+        arm_wave = math.sin(self.animation_time * 3) * 15
+        glColor3f(*self.arm_color)
+
+        glPushMatrix()
+        glTranslatef(-self.size * 0.8, 0, self.size * 0.1)
+        glRotatef(-45 + arm_wave, 0, 1, 0)
+        glRotatef(arm_wave * 0.5, 1, 0, 0)
+        gluCylinder(gluNewQuadric(), self.size * 0.15, self.size * 0.075, self.size * 0.7, 10, 10)
+        glTranslatef(0, 0, self.size * 0.7)
+        gluSphere(gluNewQuadric(), self.size * 0.12, 10, 10)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(self.size * 0.8, 0, self.size * 0.1)
+        glRotatef(45 - arm_wave, 0, 1, 0)
+        glRotatef(-arm_wave * 0.5, 1, 0, 0)
+        gluCylinder(gluNewQuadric(), self.size * 0.15, self.size * 0.075, self.size * 0.7, 10, 10)
+        glTranslatef(0, 0, self.size * 0.7)
+        gluSphere(gluNewQuadric(), self.size * 0.12, 10, 10)
+        glPopMatrix()
+
+    def _draw_floating_wisps(self):
+        for i in range(4):
+            angle = (self.animation_time * 2 + i * math.pi / 2)
+            x_offset = math.cos(angle) * self.size * 0.75
+            y_offset = math.sin(angle) * self.size * 0.75
+            z_offset = math.sin(self.animation_time * 3 + i) * 10
+
+            glPushMatrix()
+            glTranslatef(x_offset, y_offset, z_offset)
+            glColor3f(0.3, 0.1, 0.5)
+            gluSphere(gluNewQuadric(), self.size * 0.1, 8, 8)
+            glPopMatrix()
+
+    def _draw_health_bar(self):
+        bar_width = self.size * 1.5
+        bar_height = 5
+        bar_depth = 3
+
+        glPushMatrix()
+        glTranslatef(0, 0, self.size * 1.5)
+
+        glPushMatrix()
+        glColor3f(0.6, 0.0, 0.0)
+        glScalef(bar_width, bar_depth, bar_height)
+        glutSolidCube(1)
+        glPopMatrix()
+        health_percent = self.health / self.max_health
+        current_width = bar_width * health_percent
+
+        glPushMatrix()
+
+        offset = -(bar_width - current_width) / 2
+        glTranslatef(offset, 0, 0)
+        glColor3f(0.0, 0.8, 0.0)
+        glScalef(current_width, bar_depth, bar_height)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        glPopMatrix()
+
+    def take_damage(self, damage):
+        self.health -= damage
+        if self.health <= 0:
+            self.health = 0
+            self.alive = False
+
+class EnemySpawner:
+
+    def __init__(self, arena_length=900):
+        self.arena_length = arena_length
+        self.spawn_locations = self._define_spawn_locations()
+        self.spawn_timer = 0
+        self.spawn_interval = 3.0
+        self.max_enemies = 10
+        self.wave_number = 1
+
+    def _define_spawn_locations(self):
+        L = self.arena_length
+        spawn_points = {
+
+            'top_left': (-L, L),
+            'top_right': (L, L),
+            'bottom_left': (-L, -L),
+            'bottom_right': (L, -L),
+
+
+            'top_mid': (0, L),
+            'bottom_mid': (0, -L),
+            'left_mid': (-L, 0),
+            'right_mid': (L, 0),
+            'top_q1': (-L/2, L),
+            'top_q2': (L/2, L),
+            'bottom_q1': (-L/2, -L),
+            'bottom_q2': (L/2, -L),
+            'left_q1': (-L, L/2),
+            'left_q2': (-L, -L/2),
+            'right_q1': (L, L/2),
+            'right_q2': (L, -L/2),
+        }
+
+        return spawn_points
+
+    def update(self, delta_time, current_enemy_count):
+
+        self.spawn_timer += delta_time
+
+        should_spawn = (
+            self.spawn_timer >= self.spawn_interval and
+            current_enemy_count < self.max_enemies
+        )
+
+        if should_spawn:
+            self.spawn_timer = 0
+            return self.create_spawn_data()
+
+        return None
+
+    def create_spawn_data(self):
+
+        location_name = random.choice(list(self.spawn_locations.keys()))
+        x, y = self.spawn_locations[location_name]
+        pattern = random.choice(['linear', 'circular', 'zigzag'])
+
+        return {
+            'x': x,
+            'y': y,
+            'z': 50,
+            'pattern': pattern,
+            'location_name': location_name
+        }
+
+    def adjust_difficulty(self, wave):
+        self.wave_number = wave
+        self.spawn_interval = max(1.0, 3.0 - (wave * 0.2))
+        self.max_enemies = min(20, 10 + wave)
+
+
+class EnemyMovement:
+
+    @staticmethod
+    def linear_movement(enemy, target_x=0, target_y=0, speed=2.0):
+        dx = target_x - enemy.x
+        dy = target_y - enemy.y
+        distance = math.sqrt(dx**2 + dy**2)
+
+        if distance > 5:
+            enemy.x += (dx / distance) * speed
+            enemy.y += (dy / distance) * speed
+            return False
+        return True
+
+    @staticmethod
+    def circular_movement(enemy, target_x=0, target_y=0, speed=1.5):
+        dx = target_x - enemy.x
+        dy = target_y - enemy.y
+        distance = math.sqrt(dx**2 + dy**2)
+
+        if distance > 5:
+            angle = math.atan2(dy, dx)
+            spiral_angle = angle + math.sin(enemy.animation_time * 2) * 0.5
+            move_distance = speed
+            enemy.x += math.cos(spiral_angle) * move_distance
+            enemy.y += math.sin(spiral_angle) * move_distance
+            return False
+        return True
+
+    @staticmethod
+    def zigzag_movement(enemy, target_x=0, target_y=0, speed=1.8):
+        dx = target_x - enemy.x
+        dy = target_y - enemy.y
+        distance = math.sqrt(dx**2 + dy**2)
+
+        if distance > 5:
+            base_angle = math.atan2(dy, dx)
+
+            zigzag_offset = math.sin(enemy.animation_time * 4) * 30
+            perpendicular_angle = base_angle + math.pi / 2
+
+            enemy.x += math.cos(base_angle) * speed
+            enemy.y += math.sin(base_angle) * speed
+            enemy.x += math.cos(perpendicular_angle) * zigzag_offset * 0.1
+            enemy.y += math.sin(perpendicular_angle) * zigzag_offset * 0.1
+            return False
+        return True
+
+
+class SpawningMonster(Monster):
+
+    def __init__(self, x, y, z, target_x=0, target_y=0, statue_ref=None, fence_ref=None, player_ref=None):
+        super().__init__(x, y, z)
+
+        self.target_x = target_x
+        self.target_y = target_y
+        self.statue_ref = statue_ref
+        self.fence_ref = fence_ref
+        self.player_ref = player_ref
+        self.spawn_progress = 0.0
+        self.is_spawning = True
+        self.body_color = (0.4, 0.1, 0.6)
+        self.horn_color = (0.5, 0.2, 0.7)
+        self.eye_color = (0.8, 0.3, 1.0)
+        self.pupil_color = (1.0, 0.5, 1.0)
+        self.target_x = target_x
+        self.target_y = target_y
+        self.movement_speed = 0.3
+
+        self.is_dying = False
+        self.death_progress = 0.0
+        self.last_attack_time = 0.0
+        self.attack_cooldown = 1.0
+
+    def update(self):
+        super().update()
+
+        if self.is_spawning:
+            self.spawn_progress += 0.05
+            if self.spawn_progress >= 1.0:
+                self.spawn_progress = 1.0
+                self.is_spawning = False
+            return
+        if self.is_dying:
+            self.death_progress += 1.0
+            if self.death_progress >= 1.0:
+                self.alive = False
+            return
+
+        if self.alive:
+
+            closest_target = None
+            closest_distance = float('inf')
+            if hasattr(self, 'player_ref') and self.player_ref:
+                dx_player = self.player_ref.x - self.x
+                dy_player = self.player_ref.y - self.y
+                dist_player = math.sqrt(dx_player**2 + dy_player**2)
+                if dist_player < closest_distance:
+                    closest_distance = dist_player
+                    closest_target = 'player'
+
+
+            if self.fence_ref and self.fence_ref.alive:
+                dx = self.target_x - self.x
+                dy = self.target_y - self.y
+                dist_fence = math.sqrt(dx**2 + dy**2)
+                if dist_fence < closest_distance:
+                    closest_distance = dist_fence
+                    closest_target = 'fence'
+            else:
+                dx = self.target_x - self.x
+                dy = self.target_y - self.y
+                dist_statue = math.sqrt(dx**2 + dy**2)
+                if dist_statue < closest_distance:
+                    closest_distance = dist_statue
+                    closest_target = 'statue'
+
+            if closest_target == 'player':
+                dx = self.player_ref.x - self.x
+                dy = self.player_ref.y - self.y
+                distance = math.sqrt(dx**2 + dy**2)
+
+                if distance > 35:
+                    self.x += (dx / distance) * self.movement_speed
+                    self.y += (dy / distance) * self.movement_speed
+                else:
+                    if self.animation_time - self.last_attack_time >= self.attack_cooldown:
+                        self.player_ref.take_damage(10)
+                        self.last_attack_time = self.animation_time
+                    return
+
+            elif closest_target == 'fence':
+                dx = self.target_x - self.x
+                dy = self.target_y - self.y
+                dist_to_center = math.sqrt(dx**2 + dy**2)
+                target_distance = self.fence_ref.radius + 5
+
+                if dist_to_center > target_distance:
+                    self.x += (dx / dist_to_center) * self.movement_speed
+                    self.y += (dy / dist_to_center) * self.movement_speed
+                else:
+                    if self.animation_time % 2.0 < 0.1:
+                        self.fence_ref.take_damage(5)
+                    return
+
+            else:
+                dx = self.target_x - self.x
+                dy = self.target_y - self.y
+                distance = math.sqrt(dx**2 + dy**2)
+
+                if distance > 5:
+                    self.x += (dx / distance) * self.movement_speed
+                    self.y += (dy / distance) * self.movement_speed
+                else:
+                    if self.animation_time - self.last_attack_time >= self.attack_cooldown:
+                        if self.statue_ref:
+                            self.statue_ref.take_damage(10)
+                        self.last_attack_time = self.animation_time
+
+
+    def take_damage(self, damage):
+        self.health -= damage
+        if self.health <= 0:
+            self.health = 0
+            self.alive = False
+
+    def draw(self):
+        if not self.alive and not self.is_dying:
+            return
+
+        if self.is_spawning:
+            glPushMatrix()
+            glTranslatef(self.x, self.y, self.z)
+            scale = self.spawn_progress
+            glScalef(scale, scale, scale)
+
+            glPushMatrix()
+            glow_intensity = 0.5 * (1.0 - self.spawn_progress)
+            glColor3f(0.5 * glow_intensity, 0.0, 0.8 * glow_intensity)
+            gluSphere(gluNewQuadric(), self.size * 2.5, 20, 20)
+            glPopMatrix()
+            self._draw_body()
+            self._draw_horns()
+            self._draw_eyes()
+            self._draw_mouth()
+            self._draw_arms()
+            self._draw_floating_wisps()
+            self._draw_health_bar()
+
+            glPopMatrix()
+
+        elif self.is_dying:
+            glPushMatrix()
+            scale = 1.0 - self.death_progress
+            rise = self.death_progress * 50
+            glTranslatef(self.x, self.y, self.z + rise)
+            glScalef(scale, scale, scale)
+
+            glPushMatrix()
+            death_intensity = 1.0 - self.death_progress
+            glColor3f(0.8 * death_intensity, 0.0, 0.5 * death_intensity)
+            gluSphere(gluNewQuadric(), self.size * 2, 20, 20)
+            glPopMatrix()
+            self._draw_body()
+            self._draw_horns()
+            self._draw_eyes()
+            self._draw_mouth()
+            self._draw_arms()
+            self._draw_floating_wisps()
+            self._draw_health_bar()
+
+            glPopMatrix()
+
+        else:
+            super().draw()
+
+
+class YellowRangedMonster(SpawningMonster):
+    def __init__(self, x, y, z, target_x=0, target_y=0, statue_ref=None, fence_ref=None, player_ref=None):
+        super().__init__(x, y, z, target_x, target_y, statue_ref, fence_ref, player_ref)
+
+        self.body_color = (0.8, 0.7, 0.0)
+        self.horn_color = (0.9, 0.8, 0.1)
+        self.eye_color = (1.0, 0.9, 0.2)
+        self.pupil_color = (1.0, 1.0, 0.5)
+        self.arm_color = (0.7, 0.6, 0.0)
+        self.attack_range = 200
+        self.projectile_cooldown = 0.0
+        self.projectile_interval = 2.5
+        self.projectiles = []
+        self.projectile_damage = 5
+
+
+    def update(self):
+        if self.is_spawning:
+            self.spawn_progress += 0.05
+            if self.spawn_progress >= 1.0:
+                self.spawn_progress = 1.0
+                self.is_spawning = False
+            return
+        if self.is_dying:
+            self.death_progress += 1.0
+            if self.death_progress >= 1.0:
+                self.alive = False
+            return
+
+        if self.alive:
+            self.animation_time += 0.05
+
+            if self.player_ref:
+                dx_player = self.player_ref.x - self.x
+                dy_player = self.player_ref.y - self.y
+                dist_player = math.sqrt(dx_player**2 + dy_player**2)
+            else:
+                dist_player = float('inf')
+
+            dx_statue = self.statue_ref.x - self.x
+            dy_statue = self.statue_ref.y - self.y
+            dist_statue = math.sqrt(dx_statue**2 + dy_statue**2)
+
+            if dist_player < dist_statue and dist_player < 50:
+
+                if dist_player > 35:
+                    self.x += (dx_player / dist_player) * self.movement_speed
+                    self.y += (dy_player / dist_player) * self.movement_speed
+                else:
+                    if self.animation_time - self.last_attack_time >= self.attack_cooldown:
+                        self.player_ref.take_damage(10)
+                        self.last_attack_time = self.animation_time
+                return
+
+            if dist_statue > self.attack_range:
+                self.x += (dx_statue / dist_statue) * self.movement_speed
+                self.y += (dy_statue / dist_statue) * self.movement_speed
+            else:
+                if self.projectile_cooldown <= 0:
+                    self.fire_projectile()
+                    self.projectile_cooldown = self.projectile_interval
+                else:
+                    self.projectile_cooldown -= 0.05
+
+            self.update_projectiles()
+
+    def fire_projectile(self):
+
+        dx = self.statue_ref.x - self.x
+        dy = self.statue_ref.y - self.y
+        distance = math.sqrt(dx*dx + dy*dy)
+
+        projectile_speed = 6.0
+
+        projectile = {
+            'x': self.x,
+            'y': self.y,
+            'z': self.z,
+            'dx': (dx / distance) * projectile_speed,
+            'dy': (dy / distance) * projectile_speed,
+            'lifetime': 5.0,
+            'damage': self.projectile_damage
+        }
+
+        self.projectiles.append(projectile)
+
+    def update_projectiles(self):
+        for proj in self.projectiles[:]:
+            proj['x'] += proj['dx']
+            proj['y'] += proj['dy']
+            proj['lifetime'] -= 0.05
+
+            if self.statue_ref:
+                dx = proj['x'] - self.statue_ref.x
+                dy = proj['y'] - self.statue_ref.y
+                distance = math.sqrt(dx*dx + dy*dy)
+
+                if distance < 80:
+                    if self.statue_ref.shield_active and self.statue_ref.shield_health > 0:
+                        shield_blocked = self.statue_ref.take_shield_damage(proj['damage'])
+                        self.projectiles.remove(proj)
+                        continue
+                    else:
+                        self.statue_ref.take_damage(proj['damage'])
+                        print(f"Yellow projectile hit statue! Damage: {proj['damage']}")
+                        self.projectiles.remove(proj)
+                        continue
+
+            if proj['lifetime'] <= 0:
+                self.projectiles.remove(proj)
+
+        super().draw()
+
+        quad = gluNewQuadric()
+        for proj in self.projectiles:
+            glPushMatrix()
+            glTranslatef(proj['x'], proj['y'], proj['z'])
+
+            glColor3f(1.0, 0.9, 0.0)
+            gluSphere(quad, 6, 12, 12)
+
+            glColor3f(1.0, 1.0, 0.3)
+            gluSphere(quad, 9, 10, 10)
+
+            glPopMatrix()
+
+
+class SiegeMonster(SpawningMonster):
+
+    def __init__(self, x, y, z, target_x=0, target_y=0, statue_ref=None, fence_ref=None, player_ref=None):
+        super().__init__(x, y, z, target_x, target_y, statue_ref, fence_ref, player_ref)
+
+        self.siege_range = 250
+        self.projectile_cooldown = 0.0
+        self.projectile_interval = 3.0
+        self.projectiles = []
+        self.is_aiming = False
+        self.aim_timer = 0.0
+        self.aim_duration = 1.0
+        self.body_color = (0.3, 0.0, 0.15)
+        self.eye_color = (1.0, 0.0, 0.0)
+        self.size = 18
+
+    def update(self):
+        super().update()
+        if not self.alive or self.is_dying or self.is_spawning:
+            return
+
+
+        dx = self.target_x - self.x
+        dy = self.target_y - self.y
+        distance = math.sqrt(dx*dx + dy*dy)
+
+
+        if distance > self.siege_range:
+            self.x += (dx / distance) * self.movement_speed * 0.7
+            self.y += (dy / distance) * self.movement_speed * 0.7
+        else:
+            if self.projectile_cooldown <= 0:
+                if not self.is_aiming:
+
+                    self.is_aiming = True
+                    self.aim_timer = 0.0
+                else:
+
+                    self.aim_timer += 0.05
+                    if self.aim_timer >= self.aim_duration:
+
+                        self.fire_projectile()
+                        self.is_aiming = False
+                        self.aim_timer = 0.0
+                        self.projectile_cooldown = self.projectile_interval
+            else:
+                self.projectile_cooldown -= 0.05
+                self.is_aiming = False
+        self.update_projectiles()
+
+    def fire_projectile(self):
+
+        dx = self.statue_ref.x - self.x
+        dy = self.statue_ref.y - self.y
+        distance = math.sqrt(dx*dx + dy*dy)
+
+        projectile_speed = 8.0
+
+        projectile = {
+            'x': self.x,
+            'y': self.y,
+            'z': self.z,
+            'dx': (dx / distance) * projectile_speed,
+            'dy': (dy / distance) * projectile_speed,
+            'lifetime': 5.0,
+            'damage': 15
+        }
+
+        self.projectiles.append(projectile)
+        print("Siege enemy fired projectile!")
+
+    def update_projectiles(self):
+
+        for proj in self.projectiles[:]:
+            proj['x'] += proj['dx']
+            proj['y'] += proj['dy']
+            proj['lifetime'] -= 0.05
+
+            if self.statue_ref:
+                dx = proj['x'] - self.statue_ref.x
+                dy = proj['y'] - self.statue_ref.y
+                distance = math.sqrt(dx*dx + dy*dy)
+
+                if distance < 50:
+                    self.statue_ref.take_damage(proj['damage'])
+                    self.projectiles.remove(proj)
+                    print(f"Siege projectile hit statue! Damage: {proj['damage']}")
+                    continue
+
+
+            if proj['lifetime'] <= 0:
+                self.projectiles.remove(proj)
+
+    def draw(self):
+        super().draw()
+
+        if self.is_aiming and self.statue_ref:
+            pulse = 0.5 + 0.5 * abs(math.sin(self.animation_time * 10))
+            glColor3f(1.0, 0.0, 0.0)
+
+            line_width = 3
+            half_width = line_width / 2.0
+            dx = self.statue_ref.x - self.x
+            dy = self.statue_ref.y - self.y
+            length = math.sqrt(dx * dx + dy * dy)
+
+            if length > 0:
+                px = -dy / length * half_width
+                py = dx / length * half_width
+
+                glBegin(GL_QUADS)
+                glVertex3f(self.x + px, self.y + py, self.z)
+                glVertex3f(self.x - px, self.y - py, self.z)
+                glVertex3f(self.statue_ref.x - px, self.statue_ref.y - py, self.statue_ref.z)
+                glVertex3f(self.statue_ref.x + px, self.statue_ref.y + py, self.statue_ref.z)
+                glEnd()
+
+            glPushMatrix()
+            glTranslatef(self.x, self.y, self.z + self.size)
+            glColor3f(1.0, 0.0, 0.0)
+            gluSphere(gluNewQuadric(), self.size * 0.5 * pulse, 12, 12)
+            glPopMatrix()
+
+        self._draw_projectiles()
+
+    def _draw_projectiles(self):
+
+        for proj in self.projectiles:
+            glPushMatrix()
+            glTranslatef(proj['x'], proj['y'], proj['z'])
+            glColor3f(1.0, 0.2, 0.0)
+            gluSphere(gluNewQuadric(), 8, 12, 12)
+
+            glColor3f(1.0, 0.5, 0.0)
+            gluSphere(gluNewQuadric(), 12, 10, 10)
+
+            glPopMatrix()
+
+class PowerUp:
+
+    def __init__(self, x, y, powerup_type='health'):
+        self.x = x
+        self.y = y
+        self.z = 30
+        self.type = powerup_type
+        self.size = 30
+        self.rotation = 0
+        self.animation_time = 0
+        self.alive = True
+        self.collected = False
+
+        self.base_z = 15
+        self.bob_speed = random.uniform(2.5, 3.5)
+        self.bob_amplitude = random.uniform(3, 6)
+        self.rotation_speed = random.uniform(2, 4)
+        self.initial_rotation = random.uniform(0, 360)
+
+        if self.type == 'speed':
+            self.color = (0.0, 0.6, 0.0)
+            self.glow_color = (0.2, 1.0, 0.2)
+            self.inner_color = (0.6, 1.0, 0.6)
+        elif self.type == 'instakill':
+            self.color = (0.8, 0.0, 0.0)
+            self.glow_color = (1.0, 0.2, 0.2)
+            self.inner_color = (1.0, 0.6, 0.3)
+
+    def update(self, delta_time=0.05):
+
+        self.animation_time += delta_time
+        self.rotation = (self.rotation + self.rotation_speed) % 360
+
+        self.z = self.base_z + math.sin(self.animation_time * self.bob_speed) * self.bob_amplitude
+
+    def draw(self):
+
+        if not self.alive:
+            return
+
+        glPushMatrix()
+        glTranslatef(self.x, self.y, self.z)
+
+
+        glRotatef(self.rotation + self.initial_rotation, 0, 0, 1)
+        glRotatef(self.rotation * 0.7, 1, 0, 0)
+        glRotatef(self.rotation * 0.3, 0, 1, 0)
+
+        pulse = 0.8 + 0.2 * abs(math.sin(self.animation_time * 3))
+
+        glPushMatrix()
+        glColor3f(self.glow_color[0] * pulse * 0.4,
+                self.glow_color[1] * pulse * 0.4,
+                self.glow_color[2] * pulse * 0.4)
+        glScalef(1.4, 1.4, 1.4)
+        glutSolidCube(45)
+        glPopMatrix()
+
+
+        glColor3f(self.color[0] * pulse,
+                self.color[1] * pulse,
+                self.color[2] * pulse)
+        glutSolidCube(35)
+
+
+        glPushMatrix()
+        glColor3f(*self.inner_color)
+        glRotatef(45, 0, 0, 1)
+        glScalef(0.5, 0.5, 0.5)
+        glutSolidCube(35)
+        glPopMatrix()
+
+
+        glPushMatrix()
+        glColor3f(1.0, 1.0, 1.0)
+        glScalef(0.25, 0.25, 0.25)
+        glutSolidCube(35)
+        glPopMatrix()
+
+
+        for i in range(6):
+            angle = (self.animation_time * 100 + i * 60) % 360
+            rad = math.radians(angle)
+            orbit_radius = 25
+            px = math.cos(rad) * orbit_radius
+            py = math.sin(rad) * orbit_radius
+            pz = math.sin(rad * 2) * 8
+
+            glPushMatrix()
+            glTranslatef(px, py, pz)
+            glRotatef(angle * 2, 1, 1, 0)
+            glColor3f(self.glow_color[0], self.glow_color[1], self.glow_color[2])
+            glutSolidCube(4)
+            glPopMatrix()
+
+        glPopMatrix()
+
+
+    def check_collision(self, player_x, player_y):
+        dx = self.x - player_x
+        dy = self.y - player_y
+        distance = math.sqrt(dx*dx + dy*dy)
+
+        collision_distance = 110
+        return distance < collision_distance
+
+
+class Player:
+
+    def __init__(self, x=0.0, y=-400.0):
+        self.x = x
+        self.y = y
+        self.angle = 0.0
+        self.radius = 35.0
+        self.speed = 5.0
+        self.health = 200
+        self.max_health = 200
+        self.xp = 0
+        self.bullet_damage = 70
+        self.animation_time = 0.0
+        self.breathing = 0.0
+        self.leg_length = 25.0
+        self.torso_height = 30.0
+        self.head_radius = 10.0
+        self.arm_length = 20.0
+        self.skin = (0.8, 0.6, 0.5)
+        self.clothing = (0.2, 0.3, 0.5)
+        self.pants = (0.3, 0.3, 0.3)
+        self.hair = (0.2, 0.15, 0.1)
+        self.gun = (0.15, 0.15, 0.15)
+        self.energy = (1.0, 0.3, 0.0)
+
+        self.bullets = []
+        self.shoot_cooldown = 0.0
+        self.shoot_delay = 0.3
+
+        self.quadric = gluNewQuadric()
+        self.damage_boost = 0
+        self.speed_boost_timer = 0.0
+        self.has_speed_boost = False
+        self.original_bullet_speed = 15.0
+        self.transfer_effect_timer = 0
+        self.transfer_target = None
+        self.speed_boost_active = False
+        self.speed_boost_timer = 0.0
+        self.normal_speed = 5.0
+        self.boosted_speed = 8.0
+
+        self.instakill_active = False
+        self.instakill_timer = 0.0
+
+
+
+    def update(self, delta_time=0.05):
+        self.animation_time += delta_time
+        self.breathing = 0.5 * math.sin(self.animation_time * 2)
+
+
+        if self.shoot_cooldown > 0:
+            self.shoot_cooldown -= delta_time
+
+        if self.speed_boost_timer > 0:
+            self.speed_boost_timer -= delta_time
+            self.has_speed_boost = True
+        else:
+            self.has_speed_boost = False
+
+        if self.speed_boost_active:
+            self.speed_boost_timer -= delta_time
+            if self.speed_boost_timer <= 0:
+                self.speed_boost_active = False
+                self.speed = self.normal_speed
+                print("Speed boost expired!")
+
+        if self.instakill_active:
+            self.instakill_timer -= delta_time
+            if self.instakill_timer <= 0:
+                self.instakill_active = False
+                print("Instakill effect expired!")
+
+        for bullet in self.bullets[:]:
+            bullet['x'] += bullet['dx']
+            bullet['y'] += bullet['dy']
+            bullet['lifetime'] -= delta_time
+
+            if bullet['lifetime'] <= 0:
+                self.bullets.remove(bullet)
+        if hasattr(self, 'transfer_effect_timer') and self.transfer_effect_timer > 0:
+           self.transfer_effect_timer -= delta_time
+
+
+
+    def move(self, dx, dy, arena_length=600, statue=None):
+
+        new_x = self.x + dx * self.speed
+        new_y = self.y + dy * self.speed
+
+        if abs(new_x) < arena_length - 50:
+            self.x = new_x
+        if abs(new_y) < arena_length - 50:
+            self.y = new_y
+
+        if statue:
+            self.check_statue_collision(statue)
+
+        global fence
+        if fence and fence.alive:
+            self.check_fence_collision(fence)
+
+    def check_statue_collision(self, statue, statue_collision_radius=50):
+
+        dx = self.x - statue.x
+        dy = self.y - statue.y
+        distance = math.sqrt(dx*dx + dy*dy)
+        if distance < statue_collision_radius:
+            if distance > 0.1:
+                push_x = (dx / distance) * statue_collision_radius
+                push_y = (dy / distance) * statue_collision_radius
+                self.x = statue.x + push_x
+                self.y = statue.y + push_y
+            return True
+        return False
+
+    def check_fence_collision(self, fence, buffer=50):
+        dx = self.x - fence.center_x
+        dy = self.y - fence.center_y
+        distance = math.sqrt(dx*dx + dy*dy)
+        min_distance = fence.radius + self.radius + buffer
+
+        if distance < min_distance:
+            if distance > 0.1:
+                push_x = (dx / distance) * min_distance
+                push_y = (dy / distance) * min_distance
+                self.x = fence.center_x + push_x
+                self.y = fence.center_y + push_y
+            return True
+        return False
+    def collect_speed_boost(self):
+
+        self.speed_boost_active = True
+        self.speed_boost_timer = 10.0
+        self.speed = self.boosted_speed
+        print(f"SPEED BOOST! Movement speed increased for 10 seconds!")
+
+    def collect_instakill(self):
+
+        self.instakill_active = True
+        self.instakill_timer = 15.0
+        print(f"INSTAKILL MODE! One-shot enemies for 15 seconds!")
+
+
+
+
+    def check_statue_collision(self, statue, statue_collision_radius=80):
+
+        dx = self.x - statue.x
+        dy = self.y - statue.y
+        distance = math.sqrt(dx*dx + dy*dy)
+
+        if distance < statue_collision_radius:
+            if distance > 0:
+                push_x = (dx / distance) * statue_collision_radius
+                push_y = (dy / distance) * statue_collision_radius
+
+                self.x = statue.x + push_x
+                self.y = statue.y + push_y
+            return True
+        return False
+
+
+    def rotate(self, angle_delta):
+
+        self.angle = (self.angle + angle_delta) % 360
+
+    def shoot(self):
+
+        if self.shoot_cooldown > 0:
+            return
+
+        self.shoot_cooldown = self.shoot_delay
+
+        rad = math.radians(self.angle)
+
+        bullet_speed = self.original_bullet_speed
+        if self.has_speed_boost:
+            bullet_speed = self.original_bullet_speed * 1.5
+
+        bullet = {
+            'x': self.x,
+            'y': self.y,
+            'dx': bullet_speed * math.cos(rad + math.pi/2),
+            'dy': bullet_speed * math.sin(rad + math.pi/2),
+            'lifetime': 3.0
+        }
+
+        self.bullets.append(bullet)
+
+    def collect_health_pack(self):
+
+        self.health = min(self.max_health, self.health + 20)
+        self.speed_boost_timer = 5.0
+        print(f"Health Pack collected! Health: {self.health}/{self.max_health} | Speed Boost: 5s")
+
+    def collect_damage_boost(self):
+        self.damage_boost += 10
+        self.bullet_damage += 10
+        self.speed_boost_timer = 5.0
+        print(f"Damage Boost collected! Total Damage: {self.bullet_damage} | Speed Boost: 5s")
+
+    def check_bullet_collisions(self, monsters):
+        for bullet in self.bullets[:]:
+            for monster in monsters:
+                if not monster.alive or monster.is_dying:
+                    continue
+
+                dx = bullet['x'] - monster.x
+                dy = bullet['y'] - monster.y
+                distance = math.sqrt(dx*dx + dy*dy)
+
+                if distance < monster.size * 3:
+                    if self.instakill_active:
+                        monster.take_damage(99999)
+                        print("INSTAKILL!")
+                    else:
+                        monster.take_damage(self.bullet_damage)
+
+                    if monster.health <= 0:
+                        self.gain_xp(10)
+
+                    if bullet in self.bullets:
+                        self.bullets.remove(bullet)
+                    break
+
+    def take_damage(self, damage):
+        self.health -= damage
+        if self.health < 0:
+            self.health = 0
+        print(f"Player took {damage} damage! Health: {self.health}/{self.max_health}")
+
+    def gain_xp(self, amount):
+
+        self.xp += amount
+        print(f"Gained {amount} XP! Total: {self.xp}")
+
+
+
+    def draw(self):
+        glPushMatrix()
+        glTranslatef(self.x, self.y, 0)
+        glRotatef(self.angle, 0, 0, 1)
+
+        self._draw_shadow()
+        self._draw_legs()
+        self._draw_torso()
+        self._draw_head()
+        self._draw_weapon_and_arms()
+        self._draw_health_bar()
+
+        glPopMatrix()
+
+        self._draw_bullets()
+
+    def _draw_bullets(self):
+
+        glColor3f(*self.energy)
+        for bullet in self.bullets:
+            glPushMatrix()
+            glTranslatef(bullet['x'], bullet['y'], 30)
+            gluSphere(gluNewQuadric(), 5, 10, 10)
+
+            glColor3f(self.energy[0] * 0.5, self.energy[1] * 0.5, self.energy[2] * 0.5)
+            gluSphere(gluNewQuadric(), 8, 8, 8)
+
+            glPopMatrix()
+
+    def _draw_shadow(self):
+        glColor3f(0.3, 0.3, 0.3)
+        glBegin(GL_TRIANGLES)
+        for i in range(24):
+            a1 = 2 * math.pi * i / 24
+            a2 = 2 * math.pi * (i + 1) / 24
+            glVertex3f(0, 0, 0.1)
+            glVertex3f(22 * math.cos(a1), 16 * math.sin(a1), 0.1)
+            glVertex3f(22 * math.cos(a2), 16 * math.sin(a2), 0.1)
+        glEnd()
+
+    def _draw_legs(self):
+        glColor3f(*self.pants)
+        glPushMatrix()
+        glTranslatef(-4, -2, self.leg_length / 2)
+        glScalef(4, 4, self.leg_length)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(4, -2, self.leg_length / 2)
+        glScalef(4, 4, self.leg_length)
+        glutSolidCube(1)
+        glPopMatrix()
+
+    def _draw_torso(self):
+        glColor3f(*self.clothing)
+        glPushMatrix()
+        glTranslatef(0, -1, self.leg_length + self.torso_height / 2)
+        glScalef(14, 14, self.torso_height)
+        glutSolidCube(1)
+        glPopMatrix()
+
+    def _draw_head(self):
+        glPushMatrix()
+        glTranslatef(0, 0, self.leg_length + self.torso_height + self.head_radius)
+        glColor3f(*self.skin)
+        gluSphere(gluNewQuadric(), self.head_radius, 16, 16)
+        glPopMatrix()
+
+    def _draw_weapon_and_arms(self):
+        glPushMatrix()
+        chest_y = 14
+        chest_z = self.leg_length + 18
+        glTranslatef(0, chest_y-4, chest_z)
+        glRotatef(90, 0, 0, 1)
+
+        self._draw_gun_model()
+        self._draw_aiming_arms_locked_to_gun()
+
+        glPopMatrix()
+
+    def _draw_gun_model(self):
+        glColor3f(*self.gun)
+        glPushMatrix()
+        glTranslatef(10, 0, 10)
+        glScalef(24, 8, 8)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(26, 0, 10)
+        glScalef(14, 5, 5)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(12, -3, 0)
+        glScalef(6, 4, 10)
+        glutSolidCube(1)
+        glPopMatrix()
+        glColor3f(*self.energy)
+        line_width = 1.0
+        half_width = line_width / 2.0
+
+        glBegin(GL_QUADS)
+        glVertex3f(33, -half_width, 10)
+        glVertex3f(38, -half_width, 10)
+        glVertex3f(38, half_width, 10)
+        glVertex3f(33, half_width, 10)
+        glEnd()
+
+    def _draw_aiming_arms_locked_to_gun(self):
+        z = 0
+        right_hand = (12, -3)
+        left_hand = (20, 3)
+        right_shoulder = (-6, -8)
+        left_shoulder = (-6, 8)
+
+        glColor3f(*self.skin)
+        self._draw_segment_2d(left_shoulder, left_hand, z, thickness=4, depth=4)
+        self._draw_segment_2d(right_shoulder, right_hand, z, thickness=4, depth=4)
+
+        self._draw_hand_cube(left_hand[0], left_hand[1], z, size=4)
+        self._draw_hand_cube(right_hand[0], right_hand[1], z, size=4)
+
+    def _draw_segment_2d(self, p0, p1, z, thickness=4, depth=4):
+        x0, y0 = p0
+        x1, y1 = p1
+        dx, dy = (x1 - x0), (y1 - y0)
+        length = math.sqrt(dx*dx + dy*dy)
+        if length < 1e-6:
+            return
+
+        ang = math.degrees(math.atan2(dy, dx))
+
+        glPushMatrix()
+        glTranslatef((x0 + x1) * 0.5, (y0 + y1) * 0.5, z)
+        glRotatef(ang, 0, 0, 1)
+        glScalef(length, thickness, depth)
+        glutSolidCube(1)
+        glPopMatrix()
+
+    def _draw_hand_cube(self, x, y, z, size=4):
+        glPushMatrix()
+        glTranslatef(x, y, z)
+        glScalef(size, size, size)
+        glutSolidCube(1)
+        glPopMatrix()
+
+    def draw_first_person_view(self):
+
+        glPushMatrix()
+
+        glTranslatef(15, -25, -40)
+
+        if self.shoot_cooldown > 0:
+            recoil_progress = 1.0 - (self.shoot_cooldown / self.shoot_delay)
+            recoil_offset = math.sin(recoil_progress * math.pi) * 5
+            glTranslatef(-recoil_offset, 0, recoil_offset * 0.5)
+
+        glRotatef(-5, 0, 0, 1)
+        glRotatef(5, 1, 0, 0)
+
+        breath = math.sin(self.animation_time * 2) * 0.5
+        glTranslatef(0, 0, breath)
+
+        if self.shoot_cooldown > 0 and self.shoot_cooldown > (self.shoot_delay - 0.1):
+            self._draw_muzzle_flash()
+
+        self._draw_fps_bullet_tracers()
+
+        self._draw_fps_right_hand()
+
+        self._draw_fps_gun()
+
+        self._draw_fps_left_hand()
+
+        glPopMatrix()
+
+    def _draw_muzzle_flash(self):
+
+        glPushMatrix()
+        glTranslatef(43, 0, 0)
+
+        glColor3f(1.0, 0.8, 0.0)
+        gluSphere(gluNewQuadric(), 4, 8, 8)
+
+        glColor3f(1.0, 0.5, 0.0)
+        gluSphere(gluNewQuadric(), 7, 10, 10)
+
+        glColor3f(1.0, 1.0, 0.3)
+        for i in range(6):
+            angle = i * 60
+            rad = math.radians(angle)
+            x = math.cos(rad) * 10
+            y = math.sin(rad) * 10
+            glBegin(GL_TRIANGLES)
+            glVertex3f(0, 0, 0)
+            glVertex3f(x, y, 2)
+            glVertex3f(x * 0.7, y * 0.7, -2)
+            glEnd()
+
+        glPopMatrix()
+
+    def _draw_fps_bullet_tracers(self):
+        if not self.bullets:
+            return
+
+        for bullet in self.bullets:
+
+            dx = bullet['x'] - self.x
+            dy = bullet['y'] - self.y
+
+            rad = math.radians(self.angle)
+
+            local_x = dx * math.cos(-rad) - dy * math.sin(-rad)
+            local_y = dx * math.sin(-rad) + dy * math.cos(-rad)
+
+
+            if local_y > 5:
+
+                depth_factor = 100.0 / max(local_y, 1.0)
+                screen_x = 43 + local_x * depth_factor * 0.3
+                screen_z = -local_y * 0.5
+
+                glPushMatrix()
+                glTranslatef(screen_x, 0, screen_z)
+
+                glColor3f(1.0, 0.9, 0.2)
+                gluSphere(gluNewQuadric(), 2, 8, 8)
+
+                glColor3f(self.energy[0] * 0.6, self.energy[1] * 0.6, self.energy[2] * 0.6)
+                gluSphere(gluNewQuadric(), 4, 6, 6)
+
+                glPopMatrix()
+
+    def _draw_fps_gun(self):
+
+        glColor3f(*self.gun)
+
+        glPushMatrix()
+        glTranslatef(5, 0, 0)
+        glScalef(30, 10, 10)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(25, 0, 0)
+        glRotatef(90, 0, 1, 0)
+        gluCylinder(gluNewQuadric(), 3, 3, 15, 16, 16)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(40, 0, 0)
+        glColor3f(0.1, 0.1, 0.1)
+        gluCylinder(gluNewQuadric(), 4, 3, 3, 16, 16)
+        glPopMatrix()
+
+        glColor3f(0.2, 0.15, 0.1)
+        glPushMatrix()
+        glTranslatef(0, 0, -8)
+        glScalef(8, 6, 12)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        glColor3f(0.15, 0.15, 0.15)
+        glPushMatrix()
+        glTranslatef(5, 0, -12)
+        glScalef(6, 8, 10)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        glColor3f(0.3, 0.3, 0.35)
+        glPushMatrix()
+        glTranslatef(10, 0, 8)
+        glScalef(12, 6, 4)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        glColor3f(*self.energy)
+        glPushMatrix()
+        glTranslatef(43, 0, 0)
+        gluSphere(gluNewQuadric(), 2, 10, 10)
+        glPopMatrix()
+
+    def _draw_fps_right_hand(self):
+
+        glColor3f(*self.skin)
+
+        glPushMatrix()
+        glTranslatef(-5, -3, -10)
+        glRotatef(20, 1, 0, 0)
+        glRotatef(-15, 0, 1, 0)
+        gluCylinder(gluNewQuadric(), 4, 3.5, 15, 12, 12)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(0, -3, -8)
+        glScalef(5, 4, 8)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(2, -1, -6)
+        glRotatef(45, 0, 1, 0)
+        gluCylinder(gluNewQuadric(), 1.5, 1, 5, 8, 8)
+        glPopMatrix()
+
+        for i in range(4):
+            glPushMatrix()
+            glTranslatef(-1, -4 + i * 0.5, -10 + i * 1.5)
+            glRotatef(90, 0, 1, 0)
+            gluCylinder(gluNewQuadric(), 1, 0.8, 4, 8, 8)
+            glPopMatrix()
+
+    def _draw_fps_left_hand(self):
+
+        glColor3f(*self.skin)
+
+        glPushMatrix()
+        glTranslatef(18, 3, -12)
+        glRotatef(-25, 1, 0, 0)
+        glRotatef(10, 0, 1, 0)
+        gluCylinder(gluNewQuadric(), 3.5, 3, 15, 12, 12)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(20, 3, -5)
+        glRotatef(-20, 1, 0, 0)
+        glScalef(6, 4, 7)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        for i in range(4):
+            glPushMatrix()
+            glTranslatef(18 + i * 1.5, 5, -3 - i * 0.5)
+            glRotatef(90, 0, 1, 0)
+            glRotatef(20, 1, 0, 0)
+            gluCylinder(gluNewQuadric(), 0.9, 0.7, 4, 8, 8)
+            glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(22, 1, -3)
+        glRotatef(45, 0, 0, 1)
+        gluCylinder(gluNewQuadric(), 1.2, 0.9, 5, 8, 8)
+        glPopMatrix()
+
+    def _draw_health_bar(self):
+
+        glPushMatrix()
+
+        glTranslatef(0, 0, self.leg_length + self.torso_height + self.head_radius * 2 + 15)
+
+        bar_width = 60
+        bar_height = 8
+        bar_depth = 4
+
+        health_percent = self.health / self.max_health
+
+        glPushMatrix()
+        glColor3f(0.2, 0.2, 0.2)
+        glScalef(bar_width, bar_depth, bar_height)
+        glutSolidCube(1)
+        glPopMatrix()
+        border_thickness = 1.0
+        glColor3f(0.4, 0.4, 0.4)
+
+        glPushMatrix()
+        glTranslatef(0, 0, bar_height/2)
+        glScalef(bar_width, bar_depth, border_thickness)
+        glutSolidCube(1)
+        glPopMatrix()
+        glPushMatrix()
+        glTranslatef(0, 0, -bar_height/2)
+        glScalef(bar_width, bar_depth, border_thickness)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(-bar_width/2, 0, 0)
+        glScalef(border_thickness, bar_depth, bar_height)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(bar_width/2, 0, 0)
+        glScalef(border_thickness, bar_depth, bar_height)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        current_width = bar_width * health_percent
+
+        if health_percent > 0.5:
+
+            r = 2.0 * (1.0 - health_percent)
+            g = 1.0
+            b = 0.0
+        else:
+
+            r = 1.0
+            g = 2.0 * health_percent
+            b = 0.0
+
+        glPushMatrix()
+        offset = -(bar_width - current_width) / 2
+        glTranslatef(offset, 0, 0)
+        glColor3f(r, g, b)
+        glScalef(current_width, bar_depth - 2, bar_height - 4)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        glPopMatrix()
+
+    def activate_statue_shield(self, statue):
+
+        xp_cost = 50
+
+        if self.xp >= xp_cost:
+            self.xp -= xp_cost
+
+            if not statue.shield_active:
+                statue.shield_active = True
+                statue.shield_health = statue.max_shield_health
+                print(f"Shield ACTIVATED! Cost: {xp_cost} XP")
+            else:
+
+                statue.shield_health = min(statue.max_shield_health,
+                                        statue.shield_health + 30)
+                print(f"Shield RECHARGED! +30 HP | Cost: {xp_cost} XP")
+
+            self._show_energy_transfer(statue)
+            return True
+        else:
+            print(f"Not enough XP! Need {xp_cost}, have {self.xp}")
+            return False
+
+    def _show_energy_transfer(self, statue):
+
+
+        self.transfer_effect_timer = 1.0
+        self.transfer_target = statue
+
+    def draw_energy_transfer(self):
+        if not hasattr(self, 'transfer_effect_timer'):
+            return
+
+        if self.transfer_effect_timer > 0 and self.transfer_target:
+            progress = 1.0 - (self.transfer_effect_timer / 1.0)
+
+            beam_color_alpha = 0.6 * (1.0 - progress)
+            glColor3f(0.0 * beam_color_alpha, 1.0 * beam_color_alpha, 0.5 * beam_color_alpha)
+
+            line_width = 5
+            half_width = line_width / 2.0
+            dx = self.transfer_target.x - self.x
+            dy = self.transfer_target.y - self.y
+            length = math.sqrt(dx * dx + dy * dy)
+
+            if length > 0:
+                px = -dy / length * half_width
+                py = dx / length * half_width
+
+                glBegin(GL_QUADS)
+                glVertex3f(self.x + px, self.y + py, 50)
+                glVertex3f(self.x - px, self.y - py, 50)
+                glVertex3f(self.transfer_target.x - px, self.transfer_target.y - py, 50)
+                glVertex3f(self.transfer_target.x + px, self.transfer_target.y + py, 50)
+                glEnd()
+
+            for i in range(5):
+                t = (progress + i * 0.2) % 1.0
+                px = self.x + (self.transfer_target.x - self.x) * t
+                py = self.y + (self.transfer_target.y - self.y) * t
+                pz = 50 + math.sin(t * math.pi) * 20
+
+                glPushMatrix()
+                glTranslatef(px, py, pz)
+                glColor3f(0.2, 1.0, 0.6)
+                gluSphere(gluNewQuadric(), 4, 10, 10)
+                glPopMatrix()
+
+class Fence:
+    def __init__(self, center_x=0, center_y=0, radius=150, num_posts=20):
+        self.center_x = center_x
+        self.center_y = center_y
+        self.radius = radius
+        self.num_posts = num_posts
+        self.health = 50
+        self.max_health = 50
+        self.alive = True
+        self.wall_height = 60
+        self.wall_thickness = 12
+        self.stone_color = (0.6, 0.55, 0.5)
+        self.damaged_color = (0.45, 0.4, 0.35)
+        self.mortar_color = (0.7, 0.65, 0.6)
+
+    def take_damage(self, damage):
+
+        if not self.alive:
+            return
+
+        self.health -= damage
+        if self.health <= 0:
+            self.health = 0
+            self.alive = False
+        print(f"Wall took {damage} damage! Health: {self.health}/{self.max_health}")
+
+    def draw(self):
+        if not self.alive:
+            return
+        health_percent = self.health / self.max_health
+
+        for i in range(self.num_posts):
+            angle = (2 * math.pi * i) / self.num_posts
+            next_angle = (2 * math.pi * (i + 1)) / self.num_posts
+
+            x1 = self.center_x + self.radius * math.cos(angle)
+            y1 = self.center_y + self.radius * math.sin(angle)
+            x2 = self.center_x + self.radius * math.cos(next_angle)
+            y2 = self.center_y + self.radius * math.sin(next_angle)
+
+            inner_radius = self.radius - self.wall_thickness
+            x1_inner = self.center_x + inner_radius * math.cos(angle)
+            y1_inner = self.center_y + inner_radius * math.sin(angle)
+            x2_inner = self.center_x + inner_radius * math.cos(next_angle)
+            y2_inner = self.center_y + inner_radius * math.sin(next_angle)
+
+
+            if health_percent > 0.6:
+                color = self.stone_color
+            elif health_percent > 0.3:
+                color = self.damaged_color
+            else:
+                color = (0.3, 0.25, 0.2)
+
+            glColor3f(*color)
+            glBegin(GL_QUADS)
+            glVertex3f(x1, y1, 0)
+            glVertex3f(x2, y2, 0)
+            glVertex3f(x2, y2, self.wall_height)
+            glVertex3f(x1, y1, self.wall_height)
+            glEnd()
+
+            glColor3f(color[0] * 0.8, color[1] * 0.8, color[2] * 0.8)
+            glBegin(GL_QUADS)
+            glVertex3f(x1_inner, y1_inner, 0)
+            glVertex3f(x1_inner, y1_inner, self.wall_height)
+            glVertex3f(x2_inner, y2_inner, self.wall_height)
+            glVertex3f(x2_inner, y2_inner, 0)
+            glEnd()
+
+            glColor3f(self.mortar_color[0], self.mortar_color[1], self.mortar_color[2])
+            glBegin(GL_QUADS)
+            glVertex3f(x1, y1, self.wall_height)
+            glVertex3f(x2, y2, self.wall_height)
+            glVertex3f(x2_inner, y2_inner, self.wall_height)
+            glVertex3f(x1_inner, y1_inner, self.wall_height)
+            glEnd()
+
+            if health_percent > 0.3:
+                self._draw_stone_detail(x1, y1, x2, y2, health_percent)
+
+
+            if health_percent > 0.5:
+                self._draw_battlements(x1, y1, x2, y2, x1_inner, y1_inner, x2_inner, y2_inner)
+
+
+        self._draw_health_bar()
+
+    def _draw_stone_detail(self, x1, y1, x2, y2, health_percent):
+
+        glColor3f(0.5, 0.45, 0.4)
+        width = x2 - x1
+        height = y2 - y1
+        num_lines = 3
+        quad = gluNewQuadric()
+
+        for i in range(num_lines):
+            x_offset = width * (i + 1) / (num_lines + 1)
+            x_pos = x1 + x_offset
+
+            glPushMatrix()
+            glTranslatef(x_pos, y1, 0)
+
+            gluCylinder(quad, 0.02, 0.02, height, 8, 1)
+
+            glPopMatrix()
+
+        num_blocks = 2
+        for j in range(num_blocks + 1):
+            t = j / num_blocks
+            x = x1 + (x2 - x1) * t
+            y = y1 + (y2 - y1) * t
+
+            glBegin(GL_LINES)
+            glVertex3f(x, y, 0)
+            glVertex3f(x, y, self.wall_height)
+            glEnd()
+
+        for h in [self.wall_height * 0.33, self.wall_height * 0.66]:
+            glBegin(GL_LINES)
+            glVertex3f(x1, y1, h)
+            glVertex3f(x2, y2, h)
+            glEnd()
+
+    def _draw_battlements(self, x1, y1, x2, y2, x1_i, y1_i, x2_i, y2_i):
+
+        battlement_height = 8
+
+        glColor3f(0.65, 0.6, 0.55)
+
+        mid_x = (x1 + x2) / 2
+        mid_y = (y1 + y2) / 2
+        mid_x_i = (x1_i + x2_i) / 2
+        mid_y_i = (y1_i + y2_i) / 2
+
+
+        glBegin(GL_QUADS)
+
+        glVertex3f(mid_x - (x2-x1)*0.2, mid_y - (y2-y1)*0.2, self.wall_height)
+        glVertex3f(mid_x + (x2-x1)*0.2, mid_y + (y2-y1)*0.2, self.wall_height)
+        glVertex3f(mid_x + (x2-x1)*0.2, mid_y + (y2-y1)*0.2, self.wall_height + battlement_height)
+        glVertex3f(mid_x - (x2-x1)*0.2, mid_y - (y2-y1)*0.2, self.wall_height + battlement_height)
+        glEnd()
+
+
+        glColor3f(0.7, 0.65, 0.6)
+        glBegin(GL_QUADS)
+        glVertex3f(mid_x - (x2-x1)*0.2, mid_y - (y2-y1)*0.2, self.wall_height + battlement_height)
+        glVertex3f(mid_x + (x2-x1)*0.2, mid_y + (y2-y1)*0.2, self.wall_height + battlement_height)
+        glVertex3f(mid_x_i + (x2_i-x1_i)*0.2, mid_y_i + (y2_i-y1_i)*0.2, self.wall_height + battlement_height)
+        glVertex3f(mid_x_i - (x2_i-x1_i)*0.2, mid_y_i - (y2_i-y1_i)*0.2, self.wall_height + battlement_height)
+        glEnd()
+
+    def _draw_health_bar(self):
+
+        bar_width = 200
+        bar_height = 15
+        bar_depth = 8
+
+        glPushMatrix()
+        glTranslatef(self.center_x, self.center_y, self.wall_height + 80)
+
+
+        glColor3f(0.2, 0.2, 0.2)
+        glScalef(bar_width, bar_depth, bar_height)
+        glutSolidCube(1)
+
+        glPopMatrix()
+
+        health_percent = self.health / self.max_health
+        current_width = bar_width * health_percent
+
+        if health_percent > 0.6:
+            r, g, b = 0.0, 1.0, 0.0
+        elif health_percent > 0.3:
+            r, g, b = 1.0, 1.0, 0.0
+        else:
+            r, g, b = 1.0, 0.0, 0.0
+
+        glPushMatrix()
+        glTranslatef(self.center_x - (bar_width - current_width) / 2,
+                     self.center_y, self.wall_height + 80)
+        glColor3f(r, g, b)
+        glScalef(current_width, bar_depth - 2, bar_height - 4)
+        glutSolidCube(1)
+        glPopMatrix()
+
+
+class HorseCompanion:
+
+    def __init__(self, player_ref):
+        self.player_ref = player_ref
+        self.x = 0
+        self.y = -450
+        self.z = 0
+        self.angle = 0
+        self.animation_time = 0
+        self.alive = True
+        self.healing_projectiles = []
+        self.is_healing = False
+
+        self.body_length = 40
+        self.body_width = 15
+        self.body_height = 18
+        self.leg_length = 30
+        self.neck_length = 22
+        self.head_length = 15
+
+        self.body_color = (0.95, 0.95, 0.97)
+        self.darker_white = (0.85, 0.85, 0.88)
+        self.hoof_color = (0.2, 0.2, 0.2)
+        self.eye_color = (0.1, 0.1, 0.1)
+        self.mane_color = (0.9, 0.9, 0.93)
+
+        self.heal_cooldown = 0
+        self.heal_interval = 5.0
+        self.heal_amount = 10
+        self.heal_range = 100
+
+        self.speed = 3.0
+        self.follow_distance = 80
+
+        self.leg_phase = 0
+        self.tail_phase = 0
+
+        self.quadric = gluNewQuadric()
+
+    def update(self, delta_time=0.05):
+        if not self.alive or not self.player_ref:
+            return
+
+        self.animation_time += delta_time
+        self.leg_phase += delta_time * 4
+        self.tail_phase += delta_time * 3
+
+        self._follow_player()
+
+        if self.heal_cooldown > 0:
+            self.heal_cooldown -= delta_time
+
+        self._update_healing_projectiles(delta_time)
+
+
+        self._try_heal_player()
+    def _follow_player(self):
+
+        dx = self.player_ref.x - self.x
+        dy = self.player_ref.y - self.y
+        distance = math.sqrt(dx*dx + dy*dy)
+
+        if distance > self.follow_distance:
+            self.x += (dx / distance) * self.speed
+            self.y += (dy / distance) * self.speed
+            self.angle = math.degrees(math.atan2(dy, dx)) - 90
+
+    def _try_heal_player(self):
+
+        if self.heal_cooldown > 0:
+            return
+
+        dx = self.player_ref.x - self.x
+        dy = self.player_ref.y - self.y
+        distance = math.sqrt(dx*dx + dy*dy)
+
+        if distance <= self.heal_range:
+            if hasattr(self.player_ref, 'health') and hasattr(self.player_ref, 'max_health'):
+                if self.player_ref.health < self.player_ref.max_health:
+
+                    self._create_healing_projectile()
+                    self.heal_cooldown = self.heal_interval
+                    self.is_healing = True
+
+    def draw(self):
+        if not self.alive:
+            return
+
+        glPushMatrix()
+        glTranslatef(self.x, self.y, self.z)
+        glRotatef(self.angle, 0, 0, 1)
+
+        breath = math.sin(self.animation_time * 2) * 0.3
+        glTranslatef(0, 0, breath)
+
+        self._draw_shadow()
+        self._draw_legs()
+        self._draw_body()
+        self._draw_neck_and_head()
+        self._draw_tail()
+        self._draw_mane()
+        self._draw_healing_aura()
+
+        glPopMatrix()
+
+    def _draw_shadow(self):
+        glColor3f(0.2, 0.2, 0.2)
+        glPushMatrix()
+        glTranslatef(0, 0, 0.2)
+        glScalef(50, 30, 0.1)
+        glutSolidCube(1)
+        glPopMatrix()
+
+    def _draw_legs(self):
+        leg_positions = [
+            (15, 6),
+            (15, -6),
+            (-15, 6),
+            (-15, -6)
+        ]
+
+        for idx, (x, y) in enumerate(leg_positions):
+            phase_offset = 0 if (idx % 2 == 0) else math.pi
+            leg_lift = abs(math.sin(self.leg_phase + phase_offset)) * 3
+
+            glPushMatrix()
+            glTranslatef(x, y, 0)
+
+            glColor3f(*self.body_color)
+            glPushMatrix()
+            glTranslatef(0, 0, self.leg_length * 0.5 - leg_lift * 0.2)
+            gluCylinder(self.quadric, 3, 2.5, self.leg_length * 0.5, 10, 10)
+            glPopMatrix()
+
+            glPushMatrix()
+            glTranslatef(0, 0, self.leg_length * 0.2 - leg_lift * 0.4)
+            glColor3f(*self.darker_white)
+            gluCylinder(self.quadric, 2.5, 2, self.leg_length * 0.3, 10, 10)
+            glPopMatrix()
+
+            glPushMatrix()
+            glTranslatef(0, 0, 1.5 - leg_lift * 0.4)
+            glColor3f(*self.hoof_color)
+            glScalef(0.8, 0.8, 1.2)
+            gluSphere(self.quadric, 2.5, 8, 8)
+            glPopMatrix()
+
+            glPopMatrix()
+
+    def _draw_body(self):
+        glPushMatrix()
+        glTranslatef(0, 0, self.leg_length + self.body_height/2)
+
+        glColor3f(*self.body_color)
+        glPushMatrix()
+        glRotatef(90, 0, 1, 0)
+        gluCylinder(self.quadric, self.body_width, self.body_width * 0.9, self.body_length, 16, 16)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(self.body_length * 0.35, 0, 0)
+        gluSphere(self.quadric, self.body_width * 1.05, 12, 12)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(-self.body_length * 0.35, 0, 0)
+        gluSphere(self.quadric, self.body_width * 1.0, 12, 12)
+        glPopMatrix()
+
+        glPopMatrix()
+
+    def _draw_neck_and_head(self):
+        glPushMatrix()
+        glTranslatef(self.body_length * 0.4, 0, self.leg_length + self.body_height * 0.8)
+
+        glColor3f(*self.body_color)
+        glPushMatrix()
+        glRotatef(60, 0, 1, 0)
+        gluCylinder(self.quadric, 5.5, 4.5, self.neck_length, 12, 12)
+        glTranslatef(0, 0, self.neck_length)
+
+        glPushMatrix()
+        glRotatef(-30, 0, 1, 0)
+        glTranslatef(0, 0, 6)
+        glScalef(5, 4, 12)
+        gluSphere(self.quadric, 1, 12, 12)
+        glPopMatrix()
+
+        for y_offset in [-3, 3]:
+            glPushMatrix()
+            glTranslatef(-1, y_offset, 8)
+            glRotatef(-20, 1, 0, 0)
+            glColor3f(*self.darker_white)
+            gluCylinder(self.quadric, 1.5, 0.5, 6, 8, 8)
+            glPopMatrix()
+
+        glColor3f(*self.eye_color)
+        for y_offset in [-3.5, 3.5]:
+            glPushMatrix()
+            glTranslatef(3, y_offset, 5)
+            gluSphere(self.quadric, 1.2, 10, 10)
+            glPopMatrix()
+
+        glPopMatrix()
+        glPopMatrix()
+
+    def _draw_tail(self):
+        glPushMatrix()
+        glTranslatef(-self.body_length * 0.45, 0, self.leg_length + self.body_height * 0.6)
+
+        tail_sway = math.sin(self.tail_phase) * 15
+
+        glRotatef(-35, 0, 1, 0)
+        glRotatef(tail_sway, 1, 0, 0)
+
+        glColor3f(*self.mane_color)
+
+        gluCylinder(self.quadric, 3, 2.5, 10, 10, 10)
+        glTranslatef(0, 0, 10)
+        glRotatef(tail_sway * 0.5, 1, 0, 0)
+        gluCylinder(self.quadric, 2.5, 1.5, 12, 8, 8)
+        glTranslatef(0, 0, 12)
+        glRotatef(tail_sway * 0.3, 1, 0, 0)
+        gluCylinder(self.quadric, 1.5, 0.5, 10, 8, 8)
+
+        glPopMatrix()
+
+    def _draw_mane(self):
+        glColor3f(*self.mane_color)
+
+        num_segments = 6
+        for i in range(num_segments):
+            t = i / float(num_segments - 1)
+
+            x = self.body_length * 0.4 + math.cos(math.radians(60)) * self.neck_length * t
+            z = self.leg_length + self.body_height * 0.8 + math.sin(math.radians(60)) * self.neck_length * t
+
+            wave = math.sin(self.animation_time * 2 + i * 0.4) * 1.5
+
+            glPushMatrix()
+            glTranslatef(x, wave, z)
+            glRotatef(90, 1, 0, 0)
+            gluCylinder(self.quadric, 1.2, 0.4, 5, 6, 6)
+            glPopMatrix()
+
+    def _draw_healing_aura(self):
+        if self.heal_cooldown <= 0:
+            pulse = 0.5 + 0.5 * abs(math.sin(self.animation_time * 4))
+            glPushMatrix()
+            glTranslatef(0, 0, self.leg_length + self.body_height)
+
+            glColor3f(0.4, 1.0, 0.5)
+            for i in range(6):
+                angle = (self.animation_time * 2 + i * math.pi / 3) % (2 * math.pi)
+                radius = 25 + math.sin(self.animation_time * 3 + i) * 8
+                x = math.cos(angle) * radius
+                y = math.sin(angle) * radius
+                z = math.sin(self.animation_time * 4 + i) * 12
+
+                glPushMatrix()
+                glTranslatef(x, y, z)
+                gluSphere(self.quadric, 2.5, 8, 8)
+                glPopMatrix()
+
+            glPopMatrix()
+
+    def _create_healing_projectile(self):
+        dx = self.player_ref.x - self.x
+        dy = self.player_ref.y - self.y
+        distance = math.sqrt(dx*dx + dy*dy)
+
+        if distance < 0.1:
+            distance = 0.1
+
+        projectile_speed = 8.0
+
+        projectile = {
+            'x': self.x,
+            'y': self.y,
+            'z': self.leg_length + self.body_height,
+            'dx': (dx / distance) * projectile_speed,
+            'dy': (dy / distance) * projectile_speed,
+            'lifetime': 3.0,
+            'hit': False
+        }
+
+        self.healing_projectiles.append(projectile)
+        print(f"Horse casting heal on player...")
+
+    def _update_healing_projectiles(self, delta_time):
+        for proj in self.healing_projectiles[:]:
+            proj['x'] += proj['dx']
+            proj['y'] += proj['dy']
+            proj['lifetime'] -= delta_time
+
+            if not proj['hit']:
+                dx = proj['x'] - self.player_ref.x
+                dy = proj['y'] - self.player_ref.y
+                distance = math.sqrt(dx*dx + dy*dy)
+
+                if distance < 35:
+                    old_health = self.player_ref.health
+                    self.player_ref.health = min(self.player_ref.max_health,
+                                                self.player_ref.health + self.heal_amount)
+
+                    if self.player_ref.health > old_health:
+                        actual_heal = self.player_ref.health - old_health
+                        print(f"Horse healed player for {actual_heal}! Health: {self.player_ref.health}/{self.player_ref.max_health}")
+
+                    proj['hit'] = True
+                    self.healing_projectiles.remove(proj)
+                    self.is_healing = False
+                    continue
+
+            if proj['lifetime'] <= 0:
+                self.healing_projectiles.remove(proj)
+                self.is_healing = False
+
+    def _draw_healing_projectiles(self):
+        for proj in self.healing_projectiles:
+            glPushMatrix()
+            glTranslatef(proj['x'], proj['y'], proj['z'])
+
+            pulse = 0.7 + 0.3 * abs(math.sin(self.animation_time * 8))
+
+            glColor3f(1.0, 1.0, 1.0)
+            gluSphere(self.quadric, 12, 12, 12)
+
+            glColor3f(1.0, 1.0, 1.0)
+            gluSphere(self.quadric, 6, 12, 12)
+
+            glColor3f(1.0, 1.0, 0.8)
+            gluSphere(self.quadric, 3, 10, 10)
+
+            for i in range(4):
+                angle = (self.animation_time * 200 + i * 90) % 360
+                rad = math.radians(angle)
+                px = math.cos(rad) * 8
+                py = math.sin(rad) * 8
+
+                glPushMatrix()
+                glTranslatef(px, py, 0)
+                glColor3f(1.0, 1.0, 0.9)
+                gluSphere(self.quadric, 1.5, 6, 6)
+                glPopMatrix()
+
+            glPopMatrix()
+
+class Companion:
+    def __init__(self, x, y, z=50):
+        self.x = x
+        self.y = y
+        self.z = z
+        self.angle = 0
+        self.size = 20
+        self.alive = True
+        self.lifetime = 20.0
+        self.animation_time = 0
+
+        self.damage = 30
+        self.attack_range = 200
+        self.attack_cooldown = 0.0
+        self.attack_delay = 0.5
+
+        self.body_color = (0.2, 0.5, 0.3)
+        self.helmet_color = (0.3, 0.4, 0.2)
+        self.weapon_color = (0.2, 0.2, 0.2)
+        self.glow_color = (0.0, 1.0, 0.5)
+
+        self.quadric = gluNewQuadric()
+
+        self.bullets = []
+        self.current_target = None
+
+    def update(self, delta_time, monsters):
+        self.animation_time += delta_time
+        self.lifetime -= delta_time
+
+        if self.lifetime <= 0:
+            self.alive = False
+            return
+
+        if self.attack_cooldown > 0:
+            self.attack_cooldown -= delta_time
+
+        self.update_bullets(delta_time)
+
+        self.attack_nearest_enemy(monsters)
+
+    def _draw_bullets(self):
+        for bullet in self.bullets:
+            glPushMatrix()
+            glTranslatef(bullet['x'], bullet['y'], bullet['z'])
+
+            glColor3f(0.2, 1.0, 0.3)
+            gluSphere(self.quadric, 4, 10, 10)
+
+            glColor3f(0.1, 0.6, 0.2)
+            gluSphere(self.quadric, 6, 8, 8)
+
+            glPopMatrix()
+
+    def update_bullets(self, delta_time):
+        for bullet in self.bullets[:]:
+            bullet['x'] += bullet['dx'] * delta_time / 0.05
+            bullet['y'] += bullet['dy'] * delta_time / 0.05
+            bullet['lifetime'] -= delta_time
+
+            if bullet['target'] and bullet['target'].alive and not bullet['hit']:
+                dx = bullet['x'] - bullet['target'].x
+                dy = bullet['y'] - bullet['target'].y
+                distance = math.sqrt(dx*dx + dy*dy)
+
+                if distance < bullet['target'].size * 3:
+                    bullet['target'].take_damage(self.damage)
+                    bullet['hit'] = True
+                    self.bullets.remove(bullet)
+                    print(f"Companion bullet hit enemy! Damage: {self.damage}")
+                    continue
+
+            if bullet['lifetime'] <= 0:
+                self.bullets.remove(bullet)
+
+    def attack_nearest_enemy(self, monsters):
+        if self.attack_cooldown > 0:
+            return
+
+        nearest_monster = None
+        nearest_distance = self.attack_range
+
+        for monster in monsters:
+            if monster.alive and not monster.is_dying:
+                dx = monster.x - self.x
+                dy = monster.y - self.y
+                distance = math.sqrt(dx*dx + dy*dy)
+
+                if distance < nearest_distance:
+                    nearest_distance = distance
+                    nearest_monster = monster
+
+        if nearest_monster:
+            self.attack_cooldown = self.attack_delay
+            self.current_target = nearest_monster
+
+            dx = nearest_monster.x - self.x
+            dy = nearest_monster.y - self.y
+            self.angle = math.degrees(math.atan2(dy, dx))
+
+            distance = math.sqrt(dx*dx + dy*dy)
+            bullet_speed = 20.0
+
+            bullet = {
+                'x': self.x,
+                'y': self.y,
+                'z': self.z,
+                'dx': (dx / distance) * bullet_speed,
+                'dy': (dy / distance) * bullet_speed,
+                'target': nearest_monster,
+                'lifetime': 2.0,
+                'hit': False
+            }
+
+            self.bullets.append(bullet)
+            print(f"Companion fired at enemy!")
+
+    def draw(self):
+        if not self.alive:
+            return
+
+        glPushMatrix()
+        glTranslatef(self.x, self.y, self.z)
+        glRotatef(self.angle - 90, 0, 0, 1)
+
+        pulse = 0.6 + 0.4 * abs(math.sin(self.animation_time * 3))
+        glColor3f(self.glow_color[0] * pulse,
+                 self.glow_color[1] * pulse,
+                 self.glow_color[2] * pulse)
+        gluSphere(self.quadric, self.size * 1.5, 16, 16)
+
+        glColor3f(*self.body_color)
+        glPushMatrix()
+        glRotatef(-90, 1, 0, 0)
+        gluCylinder(self.quadric, self.size * 0.6, self.size * 0.5, self.size * 1.5, 16, 16)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(0, 0, self.size * 1.8)
+        glColor3f(*self.helmet_color)
+        gluSphere(self.quadric, self.size * 0.5, 16, 16)
+
+        glColor3f(0.1, 0.1, 0.1)
+        glPushMatrix()
+        glTranslatef(0, self.size * 0.4, 0)
+        glScalef(1.0, 0.2, 0.4)
+        gluSphere(self.quadric, self.size * 0.5, 12, 12)
+        glPopMatrix()
+        glPopMatrix()
+
+        glColor3f(*self.weapon_color)
+        glPushMatrix()
+        glTranslatef(self.size * 0.7, 0, self.size * 1.0)
+        glRotatef(90, 0, 1, 0)
+        gluCylinder(self.quadric, self.size * 0.1, self.size * 0.1, self.size * 1.2, 12, 12)
+        glPopMatrix()
+
+        glColor3f(*self.body_color)
+        for x_offset in [-self.size * 0.5, self.size * 0.5]:
+            glPushMatrix()
+            glTranslatef(x_offset, 0, self.size * 1.2)
+            glRotatef(-90, 1, 0, 0)
+            gluCylinder(self.quadric, self.size * 0.2, self.size * 0.15, self.size * 0.8, 12, 12)
+            glPopMatrix()
+
+        if self.attack_cooldown > 0:
+            self._draw_attack_effect()
+
+        self._draw_lifetime_bar()
+
+        glPopMatrix()
+        self._draw_bullets()
+
+    def _draw_attack_effect(self):
+        glPushMatrix()
+        glTranslatef(self.size * 1.5, 0, self.size * 1.0)
+
+        glColor3f(1.0, 1.0, 0.3)
+        gluSphere(self.quadric, self.size * 0.3, 10, 10)
+
+        for i in range(4):
+            angle = i * 90
+            rad = math.radians(angle)
+            x = math.cos(rad) * self.size * 0.5
+            z = math.sin(rad) * self.size * 0.5
+
+            glPushMatrix()
+            glTranslatef(x * 0.5, self.size * 0.15, z * 0.5)
+            glScalef(0.3, 0.3, 0.3)
+            glutSolidCube(self.size * 0.5)
+            glPopMatrix()
+
+        glPopMatrix()
+
+    def _draw_lifetime_bar(self):
+        bar_width = self.size * 2
+        bar_height = 4
+
+        glPushMatrix()
+        glTranslatef(0, 0, self.size * 2.5)
+
+        glColor3f(0.2, 0.2, 0.2)
+        glPushMatrix()
+        glScalef(bar_width, 0.1, bar_height)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        lifetime_percent = self.lifetime / 20.0
+        current_width = bar_width * lifetime_percent
+
+        glColor3f(0.0, 1.0, 0.5)
+        glPushMatrix()
+        glTranslatef(-(bar_width - current_width)/2, 0, 0)
+        glScalef(current_width, 0.15, bar_height)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        glPopMatrix()
+
+
+class Barrier:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+        self.z = 0
+        self.width = 60
+        self.height = 40
+        self.thickness = 15
+        self.health = 100
+        self.max_health = 100
+        self.alive = True
+        self.color = (0.6, 0.5, 0.4)
+
+    def take_damage(self, damage):
+        self.health -= damage
+        if self.health <= 0:
+            self.health = 0
+            self.alive = False
+            print("Barrier destroyed!")
+
+    def draw(self):
+        if not self.alive:
+            return
+
+        health_percent = self.health / self.max_health
+        if health_percent > 0.6:
+            color = self.color
+        elif health_percent > 0.3:
+            color = (0.5, 0.4, 0.3)
+        else:
+            color = (0.4, 0.3, 0.2)
+
+        glPushMatrix()
+        glTranslatef(self.x, self.y, self.height/2)
+        glColor3f(*color)
+        glScalef(self.width, self.thickness, self.height)
+        glutSolidCube(1)
+        glPopMatrix()
+
+class Spike:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+        self.z = 0
+        self.radius = 30
+        self.damage = 25
+        self.damage_cooldown = {}
+        self.alive = True
+        self.animation_time = 0
+        self.quadric = gluNewQuadric()
+
+    def update(self, delta_time, monsters):
+        self.animation_time += delta_time
+
+        for monster in monsters:
+            if not monster.alive:
+                continue
+
+            dx = monster.x - self.x
+            dy = monster.y - self.y
+            distance = math.sqrt(dx*dx + dy*dy)
+
+            if distance < self.radius:
+                monster_id = id(monster)
+                if monster_id not in self.damage_cooldown:
+                    self.damage_cooldown[monster_id] = 0
+
+                self.damage_cooldown[monster_id] -= delta_time
+                if self.damage_cooldown[monster_id] <= 0:
+                    monster.take_damage(self.damage)
+                    self.damage_cooldown[monster_id] = 1.0
+                    print(f"Spike hit enemy for {self.damage} damage!")
+
+    def draw(self):
+        if not self.alive:
+            return
+
+        glPushMatrix()
+        glTranslatef(self.x, self.y, self.z)
+
+        glColor3f(0.3, 0.3, 0.3)
+        glPushMatrix()
+        glRotatef(90, 1, 0, 0)
+        glScalef(self.radius, self.radius, 1)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        num_spikes = 8
+        for i in range(num_spikes):
+            angle = (2 * math.pi * i) / num_spikes
+            x = math.cos(angle) * self.radius * 0.7
+            y = math.sin(angle) * self.radius * 0.7
+
+            glPushMatrix()
+            glTranslatef(x, y, 0)
+            glColor3f(0.5, 0.5, 0.5)
+            gluCylinder(self.quadric, 3, 0, 15, 8, 8)
+            glPopMatrix()
+
+        glPopMatrix()
+
+class Bomb:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+        self.z = 10
+        self.radius = 20
+        self.explosion_radius = 100
+        self.damage = 150
+        self.timer = 3.0
+        self.alive = True
+        self.exploded = False
+        self.explosion_timer = 0.5
+        self.animation_time = 0
+        self.quadric = gluNewQuadric()
+
+    def update(self, delta_time, monsters):
+        self.animation_time += delta_time
+
+        if self.exploded:
+            self.explosion_timer -= delta_time
+            if self.explosion_timer <= 0:
+                self.alive = False
+            return
+
+        self.timer -= delta_time
+
+        if self.timer <= 0 and not self.exploded:
+            self.explode(monsters)
+
+    def explode(self, monsters):
+        self.exploded = True
+        self.explosion_timer = 0.5
+        print(f"BOOM! Bomb exploded at ({int(self.x)}, {int(self.y)})")
+
+        for monster in monsters:
+            if not monster.alive:
+                continue
+
+            dx = monster.x - self.x
+            dy = monster.y - self.y
+            distance = math.sqrt(dx*dx + dy*dy)
+
+            if distance < self.explosion_radius:
+                monster.take_damage(self.damage)
+                print(f"Bomb hit enemy for {self.damage} damage!")
+
+    def draw(self):
+        if not self.alive:
+            return
+
+        glPushMatrix()
+        glTranslatef(self.x, self.y, self.z)
+
+        if self.exploded:
+            progress = 1.0 - (self.explosion_timer / 0.5)
+            explosion_size = self.explosion_radius * progress
+
+            glColor3f(1.0, 0.5, 0.0)
+            gluSphere(self.quadric, explosion_size, 20, 20)
+
+            glColor3f(1.0, 1.0, 0.0)
+            gluSphere(self.quadric, explosion_size * 0.6, 16, 16)
+
+            glColor3f(1.0, 1.0, 1.0)
+            gluSphere(self.quadric, explosion_size * 0.3, 12, 12)
+
+            glPopMatrix()
+            return
+
+        pulse = 0.7 + 0.3 * abs(math.sin(self.animation_time * 5))
+        if self.timer < 1.0:
+            glColor3f(1.0 * pulse, 0.0, 0.0)
+        else:
+            glColor3f(0.2, 0.2, 0.2)
+
+        gluSphere(self.quadric, self.radius, 16, 16)
+
+        glColor3f(0.8, 0.6, 0.2)
+        glPushMatrix()
+        glTranslatef(0, 0, self.radius)
+        gluCylinder(self.quadric, 2, 2, 10, 8, 8)
+
+        if self.timer < 1.5:
+            glTranslatef(0, 0, 10)
+            glColor3f(1.0, 0.8, 0.0)
+            gluSphere(self.quadric, 3 * pulse, 8, 8)
+
+        glPopMatrix()
+        glPopMatrix()
+
+class BossEnemy(SpawningMonster):
+    def __init__(self, x, y, z, target_x=0, target_y=0, statue_ref=None, fence_ref=None, player_ref=None):
+        super().__init__(x, y, z, target_x, target_y, statue_ref, fence_ref, player_ref)
+
+        self.health = 300
+        self.max_health = 300
+        self.size = 30
+        self.movement_speed = 0.4
+
+        self.armor_color = (0.3, 0.2, 0.15)
+        self.skin_color = (0.5, 0.4, 0.3)
+        self.metal_color = (0.4, 0.4, 0.45)
+        self.eye_color = (1.0, 0.3, 0.0)
+        self.horn_color = (0.2, 0.15, 0.1)
+        self.flame_color = (1.0, 0.4, 0.0)
+
+        self.attack_damage = 25
+        self.last_attack_time = 0
+        self.attack_cooldown = 0.8
+
+        self.quadric = gluNewQuadric()
+
+    def update(self):
+        if self.is_spawning:
+            self.spawn_progress += 0.05
+            if self.spawn_progress >= 1.0:
+                self.spawn_progress = 1.0
+                self.is_spawning = False
+            return
+
+        if self.is_dying:
+            self.death_progress += 1.0
+            if self.death_progress >= 1.0:
+                self.alive = False
+            return
+
+        if self.alive and self.player_ref:
+            self.animation_time += 0.05
+
+            dx = self.player_ref.x - self.x
+            dy = self.player_ref.y - self.y
+            distance = math.sqrt(dx**2 + dy**2)
+
+            if distance > 50:
+                self.x += (dx / distance) * self.movement_speed
+                self.y += (dy / distance) * self.movement_speed
+            else:
+                if self.animation_time - self.last_attack_time >= self.attack_cooldown:
+                    self.player_ref.take_damage(self.attack_damage)
+                    self.last_attack_time = self.animation_time
+                    print(f"BOSS hit player for {self.attack_damage} damage!")
+
+    def draw(self):
+        if not self.alive and not self.is_dying:
+            return
+
+        if self.is_spawning:
+            glPushMatrix()
+            glTranslatef(self.x, self.y, self.z)
+            scale = self.spawn_progress
+            glScalef(scale, scale, scale)
+
+            glColor3f(1.0, 0.3, 0.0)
+            gluSphere(self.quadric, self.size * 3, 20, 20)
+
+            self._draw_boss_body()
+            glPopMatrix()
+            return
+
+        if self.is_dying:
+            glPushMatrix()
+            scale = 1.0 - self.death_progress
+            rise = self.death_progress * 50
+            glTranslatef(self.x, self.y, self.z + rise)
+            glScalef(scale, scale, scale)
+
+            glColor3f(1.0, 0.5, 0.0)
+            gluSphere(self.quadric, self.size * 2.5, 20, 20)
+
+            self._draw_boss_body()
+            glPopMatrix()
+            return
+
+        glPushMatrix()
+        glTranslatef(self.x, self.y, self.z)
+
+        bob = math.sin(self.animation_time * 2) * 3
+        glTranslatef(0, 0, bob)
+
+        self._draw_flame_aura()
+        self._draw_boss_body()
+        self._draw_health_bar()
+
+        glPopMatrix()
+
+    def _draw_boss_body(self):
+        self._draw_legs()
+        self._draw_torso()
+        self._draw_arms()
+        self._draw_head()
+        self._draw_axe()
+
+    def _draw_legs(self):
+        leg_positions = [(-self.size * 0.25, -self.size * 0.15),
+                        (self.size * 0.25, -self.size * 0.15)]
+
+        for x, y in leg_positions:
+            glPushMatrix()
+            glTranslatef(x, y, 0)
+
+            glColor3f(*self.armor_color)
+            glPushMatrix()
+            glTranslatef(0, 0, self.size * 0.6)
+            gluCylinder(self.quadric, self.size * 0.18, self.size * 0.15, self.size * 0.7, 12, 12)
+            glPopMatrix()
+
+            glPushMatrix()
+            glTranslatef(0, 0, self.size * 0.3)
+            glColor3f(*self.metal_color)
+            gluCylinder(self.quadric, self.size * 0.15, self.size * 0.12, self.size * 0.4, 12, 12)
+            glPopMatrix()
+
+            glPushMatrix()
+            glTranslatef(0, self.size * 0.1, self.size * 0.1)
+            glColor3f(0.2, 0.15, 0.1)
+            glScalef(self.size * 0.15, self.size * 0.25, self.size * 0.12)
+            glutSolidCube(1)
+            glPopMatrix()
+
+            glPopMatrix()
+
+    def _draw_torso(self):
+        glPushMatrix()
+        glTranslatef(0, 0, self.size * 1.3)
+
+        glColor3f(*self.armor_color)
+        glPushMatrix()
+        glRotatef(-90, 1, 0, 0)
+        gluCylinder(self.quadric, self.size * 0.35, self.size * 0.32, self.size * 0.8, 16, 16)
+        glPopMatrix()
+
+        glColor3f(*self.metal_color)
+        glPushMatrix()
+        glTranslatef(0, self.size * 0.35, 0)
+        glScalef(self.size * 0.6, self.size * 0.1, self.size * 0.7)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        for x in [-self.size * 0.4, self.size * 0.4]:
+            glPushMatrix()
+            glTranslatef(x, 0, self.size * 0.35)
+            glColor3f(*self.metal_color)
+            gluSphere(self.quadric, self.size * 0.2, 12, 12)
+            glPopMatrix()
+
+        glPopMatrix()
+
+    def _draw_arms(self):
+        arm_positions = [(-self.size * 0.4, 0, self.size * 1.6),
+                        (self.size * 0.4, 0, self.size * 1.6)]
+
+        arm_swing = math.sin(self.animation_time * 2) * 15
+
+        for idx, (x, y, z) in enumerate(arm_positions):
+            glPushMatrix()
+            glTranslatef(x, y, z)
+
+            swing = arm_swing if idx == 0 else -arm_swing
+            glRotatef(swing, 1, 0, 0)
+
+            glColor3f(*self.skin_color)
+            glPushMatrix()
+            glRotatef(-90, 1, 0, 0)
+            gluCylinder(self.quadric, self.size * 0.15, self.size * 0.13, self.size * 0.5, 12, 12)
+            glPopMatrix()
+
+            glPushMatrix()
+            glTranslatef(0, 0, -self.size * 0.5)
+            glColor3f(*self.armor_color)
+            gluSphere(self.quadric, self.size * 0.14, 10, 10)
+            glPopMatrix()
+
+            glPushMatrix()
+            glTranslatef(0, 0, -self.size * 0.5)
+            glColor3f(*self.metal_color)
+            glRotatef(-90, 1, 0, 0)
+            gluCylinder(self.quadric, self.size * 0.13, self.size * 0.11, self.size * 0.5, 12, 12)
+            glPopMatrix()
+
+            glPushMatrix()
+            glTranslatef(0, 0, -self.size * 1.0)
+            glColor3f(*self.skin_color)
+            glScalef(self.size * 0.12, self.size * 0.12, self.size * 0.15)
+            glutSolidCube(1)
+            glPopMatrix()
+
+            glPopMatrix()
+
+    def _draw_head(self):
+        glPushMatrix()
+        glTranslatef(0, 0, self.size * 2.2)
+
+        glColor3f(*self.skin_color)
+        gluSphere(self.quadric, self.size * 0.25, 16, 16)
+
+        eye_glow = 0.7 + 0.3 * abs(math.sin(self.animation_time * 4))
+        glColor3f(self.eye_color[0] * eye_glow,
+                 self.eye_color[1] * eye_glow,
+                 self.eye_color[2] * eye_glow)
+
+        for x in [-self.size * 0.12, self.size * 0.12]:
+            glPushMatrix()
+            glTranslatef(x, self.size * 0.22, self.size * 0.05)
+            gluSphere(self.quadric, self.size * 0.06, 10, 10)
+            glPopMatrix()
+
+        glColor3f(*self.horn_color)
+        for x in [-self.size * 0.18, self.size * 0.18]:
+            glPushMatrix()
+            glTranslatef(x, 0, self.size * 0.2)
+            glRotatef(45 * (-1 if x < 0 else 1), 0, 1, 0)
+            glRotatef(-30, 1, 0, 0)
+            gluCylinder(self.quadric, self.size * 0.08, self.size * 0.02, self.size * 0.4, 12, 12)
+            glPopMatrix()
+
+        glPopMatrix()
+
+    def _draw_axe(self):
+        glPushMatrix()
+
+        glTranslatef(self.size * 0.4, 0, self.size * 1.0)
+
+        axe_swing = math.sin(self.animation_time * 2) * 20
+        glRotatef(axe_swing + 45, 1, 0, 0)
+
+        glColor3f(0.4, 0.3, 0.2)
+        glPushMatrix()
+        glRotatef(-90, 1, 0, 0)
+        gluCylinder(self.quadric, self.size * 0.05, self.size * 0.05, self.size * 1.2, 12, 12)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(0, 0, -self.size * 1.2)
+
+        glColor3f(*self.metal_color)
+        glPushMatrix()
+        glRotatef(90, 0, 0, 1)
+        glScalef(self.size * 0.6, self.size * 0.08, self.size * 0.3)
+        glutSolidCube(1)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(self.size * 0.3, 0, 0)
+        glRotatef(90, 0, 1, 0)
+        glColor3f(0.6, 0.6, 0.65)
+        gluCylinder(self.quadric, self.size * 0.15, 0, self.size * 0.2, 12, 12)
+        glPopMatrix()
+
+        glPopMatrix()
+        glPopMatrix()
+
+    def _draw_flame_aura(self):
+        pulse = 0.6 + 0.4 * abs(math.sin(self.animation_time * 3))
+
+        glColor3f(self.flame_color[0] * pulse,
+                 self.flame_color[1] * pulse,
+                 self.flame_color[2] * pulse)
+        gluSphere(self.quadric, self.size * 1.3, 20, 20)
+
+        glColor3f(1.0, 0.2, 0.0)
+        gluSphere(self.quadric, self.size * 1.6, 16, 16)
+
+        for i in range(8):
+            angle = (self.animation_time * 2 + i * math.pi / 4)
+            x_offset = math.cos(angle) * self.size * 1.2
+            y_offset = math.sin(angle) * self.size * 1.2
+            z_offset = math.sin(self.animation_time * 3 + i) * self.size * 0.5
+
+            glPushMatrix()
+            glTranslatef(x_offset, y_offset, z_offset + self.size)
+            glColor3f(1.0, 0.5, 0.0)
+            gluSphere(self.quadric, self.size * 0.08, 8, 8)
+            glPopMatrix()
+
+    def _draw_health_bar(self):
+        bar_width = self.size * 2.5
+        bar_height = 8
+
+        glPushMatrix()
+        glTranslatef(0, 0, self.size * 3)
+
+        glColor3f(0.2, 0.2, 0.2)
+        glBegin(GL_QUADS)
+        glVertex3f(-bar_width/2, 0, 0)
+        glVertex3f(bar_width/2, 0, 0)
+        glVertex3f(bar_width/2, 0, bar_height)
+        glVertex3f(-bar_width/2, 0, bar_height)
+        glEnd()
+
+        health_percent = self.health / self.max_health
+        current_width = bar_width * health_percent
+
+        if health_percent > 0.6:
+            glColor3f(1.0, 0.5, 0.0)
+        elif health_percent > 0.3:
+            glColor3f(1.0, 0.3, 0.0)
+        else:
+            glColor3f(1.0, 0.0, 0.0)
+
+        glBegin(GL_QUADS)
+        glVertex3f(-bar_width/2, 0, 0)
+        glVertex3f(-bar_width/2 + current_width, 0, 0)
+        glVertex3f(-bar_width/2 + current_width, 0, bar_height)
+        glVertex3f(-bar_width/2, 0, bar_height)
+        glEnd()
+
+        glPopMatrix()
+
+
+def setupCamera():
+    global camera_angle, camera_distance, first_person_mode, player
+    glMatrixMode(GL_PROJECTION)
+    glLoadIdentity()
+    gluPerspective(fovY, 1.25, 0.1, 2000)
+    glMatrixMode(GL_MODELVIEW)
+    glLoadIdentity()
+
+    if first_person_mode and player:
+        cam_x = player.x
+        cam_y = player.y
+        cam_z = 60
+
+        rad = math.radians(player.angle + 90)
+        look_distance = 100
+        look_x = cam_x + math.cos(rad) * look_distance
+        look_y = cam_y + math.sin(rad) * look_distance
+        look_z = 55
+
+        gluLookAt(
+            cam_x, cam_y, cam_z,
+            look_x, look_y, look_z,
+            0, 0, 1
+        )
+    else:
+        rad = math.radians(camera_angle)
+        cam_x = camera_distance * math.cos(rad)
+        cam_y = camera_distance * math.sin(rad)
+        cam_z = camera_distance * 0.6
+        gluLookAt(cam_x, cam_y, cam_z, 0, 0, 0, 0, 0, 1)
+
+def draw_text(x, y, text, font=GLUT_BITMAP_HELVETICA_18):
+    glMatrixMode(GL_PROJECTION)
+    glPushMatrix()
+    glLoadIdentity()
+    gluOrtho2D(0, 1000, 0, 800)
+    glMatrixMode(GL_MODELVIEW)
+    glPushMatrix()
+    glLoadIdentity()
+    glColor3f(1, 1, 1)
+    glRasterPos2f(x, y)
+    for ch in text:
+        glutBitmapCharacter(font, ord(ch))
+    glPopMatrix()
+    glMatrixMode(GL_PROJECTION)
+    glPopMatrix()
+    glMatrixMode(GL_MODELVIEW)
+
+def draw_game_over():
+    global game_won
+
+    glMatrixMode(GL_PROJECTION)
+    glPushMatrix()
+    glLoadIdentity()
+    gluOrtho2D(0, 1000, 0, 800)
+    glMatrixMode(GL_MODELVIEW)
+    glPushMatrix()
+    glLoadIdentity()
+
+    glColor3f(0.3, 0.3, 0.3)
+    glBegin(GL_QUADS)
+    glVertex2f(0, 0)
+    glVertex2f(1000, 0)
+    glVertex2f(1000, 800)
+    glVertex2f(0, 800)
+    glEnd()
+
+    if game_won:
+        glColor3f(0.0, 1.0, 0.0)
+        glRasterPos2f(420, 450)
+        text = "Winner"
+        for ch in text:
+            glutBitmapCharacter(GLUT_BITMAP_TIMES_ROMAN_24, ord(ch))
+
+        glColor3f(0.0, 1.0, 0.0)
+        glRasterPos2f(350, 400)
+        text = "You survived 3 MINUTES!"
+        for ch in text:
+            glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, ord(ch))
+    else:
+        glColor3f(1.0, 0.0, 0.0)
+        glRasterPos2f(385, 450)
+        text = "GAME OVER"
+        for ch in text:
+            glutBitmapCharacter(GLUT_BITMAP_TIMES_ROMAN_24, ord(ch))
+
+        glColor3f(1.0, 0.0, 0.0)
+        glRasterPos2f(380, 400)
+        text = "TRY AGAIN NOW!"
+        for ch in text:
+            glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, ord(ch))
+
+    glColor3f(1.0, 1.0, 1.0)
+    glRasterPos2f(380, 350)
+    text = "Press P to Restart"
+    for ch in text:
+        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, ord(ch))
+
+    glPopMatrix()
+    glMatrixMode(GL_PROJECTION)
+    glPopMatrix()
+    glMatrixMode(GL_MODELVIEW)
+
+
+def showScreen():
+    global arena, statue, player, game_over, first_person_mode
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+    glLoadIdentity()
+    glViewport(0, 0, 1000, 800)
+    setupCamera()
+
+    if arena:
+        arena.draw()
+    if fence:
+       fence.draw()
+    if statue:
+        statue.draw()
+    if horse:
+        horse.draw()
+    if player and not first_person_mode:
+        player.draw()
+    if player and hasattr(player, 'transfer_effect_timer'):
+        player.draw_energy_transfer()
+
+    for monster in monsters:
+        monster.draw()
+    for powerup in powerups:
+        powerup.draw()
+    for companion in companions:
+        companion.draw()
+    for barrier in barriers:
+        barrier.draw()
+    for spike in spikes:
+        spike.draw()
+    for bomb in bombs:
+        bomb.draw()
+
+    if first_person_mode and player:
+        glMatrixMode(GL_PROJECTION)
+        glPushMatrix()
+        glMatrixMode(GL_MODELVIEW)
+        glPushMatrix()
+        glLoadIdentity()
+        player.draw_first_person_view()
+        glMatrixMode(GL_PROJECTION)
+        glPopMatrix()
+        glMatrixMode(GL_MODELVIEW)
+        glPopMatrix()
+    minutes = int(game_timer // 60)
+    seconds = int(game_timer % 60)
+    timer_text = f"{minutes:02d}:{seconds:02d}"
+
+    if game_timer > 120:
+        timer_color = (0.0, 1.0, 0.0)
+    elif game_timer > 60:
+        timer_color = (1.0, 1.0, 0.0)
+    else:
+        timer_color = (1.0, 0.0, 0.0)
+
+    glMatrixMode(GL_PROJECTION)
+    glPushMatrix()
+    glLoadIdentity()
+    gluOrtho2D(0, 1000, 0, 800)
+    glMatrixMode(GL_MODELVIEW)
+    glPushMatrix()
+    glLoadIdentity()
+    glColor3f(*timer_color)
+    glRasterPos2f(450, 770)
+    for ch in timer_text:
+        glutBitmapCharacter(GLUT_BITMAP_TIMES_ROMAN_24, ord(ch))
+    glPopMatrix()
+    glMatrixMode(GL_PROJECTION)
+    glPopMatrix()
+    glMatrixMode(GL_MODELVIEW)
+
+    health_percent = statue.health / statue.max_health
+    if health_percent > 0.6:
+        health_color = (0.0, 1.0, 0.0)
+    elif health_percent > 0.3:
+        health_color = (1.0, 1.0, 0.0)
+    else:
+        health_color = (1.0, 0.0, 0.0)
+
+    glColor3f(*health_color)
+    draw_text(10, 745, f"Statue Health: {statue.health}/{statue.max_health}")
+
+    if statue.shield_active and statue.shield_health > 0:
+        shield_percent = statue.shield_health / statue.max_shield_health
+        if shield_percent > 0.6:
+            shield_color = (0.0, 1.0, 0.0)
+        elif shield_percent > 0.3:
+            shield_color = (1.0, 1.0, 0.0)
+        else:
+            shield_color = (1.0, 0.0, 0.0)
+        glColor3f(*shield_color)
+        draw_text(350, 720, f"Shield: {statue.shield_health}/{statue.max_shield_health}")
+    else:
+        glColor3f(0.5, 0.5, 0.5)
+        draw_text(250, 720, "Shield: INACTIVE (Press X - 50 XP)")
+
+    if fence and fence.alive:
+        glColor3f(0.6, 0.4, 0.2)
+    else:
+        glColor3f(0.5, 0.5, 0.5)
+    if fence:
+        text = f"Wall: {fence.health}/{fence.max_health} {'(DESTROYED)' if not fence.alive else ''}"
+    else:
+        text = "Wall: None"
+    draw_text(700, 745, text)
+
+    glColor3f(1.0, 1.0, 1.0)
+    draw_text(10, 695, f"Player Health: {player.health}/{player.max_health}")
+    draw_text(10, 670, f"XP: {player.xp}")
+    draw_text(10, 645, f"Bullet Damage: {player.bullet_damage}")
+
+    if player.speed_boost_active:
+        glColor3f(0.0, 1.0, 0.0)
+        draw_text(10, 620, f"SPEED BOOST: {player.speed_boost_timer:.1f}s")
+
+    if player.instakill_active:
+        glColor3f(1.0, 0.0, 0.0)
+        draw_text(10, 595, f"INSTAKILL MODE: {player.instakill_timer:.1f}s")
+
+    glColor3f(1.0, 1.0, 1.0)
+    draw_text(10, 545, f"Active Enemies: {len(monsters)}")
+
+    if sudden_death_active:
+        boss_count = sum(1 for m in monsters if isinstance(m, BossEnemy))
+        glColor3f(1.0, 0.0, 0.0)
+        draw_text(10, 520, f"BOSS ENEMIES: {boss_count}/{max_bosses}")
+
+    glColor3f(1.0, 1.0, 1.0)
+    draw_text(10, 495, f"Active Power-ups: {len(powerups)}")
+    draw_text(10, 470, f"Companions: {len(companions)}/{MAX_COMPANIONS}")
+    draw_text(10, 445, f"Barriers: {len(barriers)} | Spikes: {len(spikes)}")
+
+    if game_paused:
+        glColor3f(1.0, 1.0, 0.0)
+        glMatrixMode(GL_PROJECTION)
+        glPushMatrix()
+        glLoadIdentity()
+        gluOrtho2D(0, 1000, 0, 800)
+        glMatrixMode(GL_MODELVIEW)
+        glPushMatrix()
+        glLoadIdentity()
+        glRasterPos2f(420, 400)
+        text = "PAUSED"
+        for ch in text:
+            glutBitmapCharacter(GLUT_BITMAP_TIMES_ROMAN_24, ord(ch))
+
+        glColor3f(1.0, 1.0, 1.0)
+        glRasterPos2f(380, 360)
+        text = "Press SPACE to resume"
+        for ch in text:
+            glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, ord(ch))
+        glPopMatrix()
+        glMatrixMode(GL_PROJECTION)
+        glPopMatrix()
+        glMatrixMode(GL_MODELVIEW)
+
+    if game_over or game_won:
+        draw_game_over()
+
+    glutSwapBuffers()
+
+
+spawner = None
+import time
+last_time = time.time()
+
+def update():
+    global arena, statue, monsters, spawn_timer, spawn_interval, game_over, player
+    global powerups, powerup_spawn_timer, powerup_spawn_interval
+    global game_timer, game_won, timer_paused
+    global last_time,horse ,game_paused,companions
+    global sudden_death_active, boss_spawn_timer, boss_spawn_interval, max_bosses
+
+    current_time = time.time()
+    delta_time = current_time - last_time
+    last_time = current_time
+    if game_paused:
+        glutPostRedisplay()
+        return
+
+    delta_time = min(delta_time, 0.1)
+
+    if game_over or game_won:
+        glutPostRedisplay()
+        return
+
+    if not timer_paused:
+        game_timer -= delta_time
+        if game_timer <= 0:
+            game_timer = 0
+            game_won = True
+            print("Victory! You survived 5 minutes!")
+
+    if game_timer <= 60.0 and not sudden_death_active:
+        sudden_death_active = True
+        arena.set_state('last_stand')
+        statue.set_state('last_stand')
+
+        arena.activate_warning_zone('top')
+        arena.activate_warning_zone('bottom')
+        arena.activate_warning_zone('left')
+        arena.activate_warning_zone('right')
+
+        print("=== SUDDEN DEATH MODE ACTIVATED ===")
+        print("Arena edges turning red! Boss enemies incoming!")
+
+    if sudden_death_active:
+        boss_count = sum(1 for m in monsters if isinstance(m, BossEnemy))
+
+        if boss_count < max_bosses:
+            boss_spawn_timer += delta_time
+
+            if boss_spawn_timer >= boss_spawn_interval:
+                boss_spawn_timer = 0
+
+                edge = random.choice(['top', 'bottom', 'left', 'right'])
+
+                if edge == 'top':
+                    x = random.uniform(-arena.length, arena.length)
+                    y = arena.length
+                elif edge == 'bottom':
+                    x = random.uniform(-arena.length, arena.length)
+                    y = -arena.length
+                elif edge == 'left':
+                    x = -arena.length
+                    y = random.uniform(-arena.length, arena.length)
+                else:
+                    x = arena.length
+                    y = random.uniform(-arena.length, arena.length)
+
+                boss = BossEnemy(x, y, 50, target_x=0, target_y=0,
+                            statue_ref=statue, fence_ref=fence, player_ref=player)
+                monsters.append(boss)
+                print(f"BOSS ENEMY SPAWNED! (HP: 300) Total Bosses: {boss_count + 1}/{max_bosses}")
+
+
+    if player:
+        player.update(delta_time)
+        player.check_bullet_collisions(monsters)
+
+    if player and player.health <= 0:
+        game_over = True
+        print("Player died!")
+    if horse:
+        horse.update(delta_time)
+
+    for monster in monsters[:]:
+        monster.update()
+        if not monster.alive and not monster.is_dying:
+            monsters.remove(monster)
+    for companion in companions[:]:
+       companion.update(delta_time, monsters)
+       if not companion.alive:
+          companions.remove(companion)
+          print("Companion duration expired!")
+
+    if len(monsters) < 8:
+        spawn_timer += delta_time
+
+        if spawn_timer >= spawn_interval:
+            spawn_timer = 0
+
+            edge = random.choice(['top', 'bottom', 'left', 'right'])
+
+            if edge == 'top':
+                x = random.uniform(-arena.length, arena.length)
+                y = arena.length
+            elif edge == 'bottom':
+                x = random.uniform(-arena.length, arena.length)
+                y = -arena.length
+            elif edge == 'left':
+                x = -arena.length
+                y = random.uniform(-arena.length, arena.length)
+            else:
+                x = arena.length
+                y = random.uniform(-arena.length, arena.length)
+
+            if random.random() < 0.5:
+                new_monster = YellowRangedMonster(x, y, 50, target_x=0, target_y=0,
+                                                statue_ref=statue, fence_ref=fence, player_ref=player)
+                print("Yellow ranged enemy spawned!")
+            else:
+                new_monster = SpawningMonster(x, y, 50, target_x=0, target_y=0,
+                                            statue_ref=statue, fence_ref=fence, player_ref=player)
+                print("Violet wall-breaker enemy spawned!")
+
+            monsters.append(new_monster)
+    else:
+        spawn_timer = 0
+
+    powerup_spawn_timer += delta_time
+    if powerup_spawn_timer >= powerup_spawn_interval:
+        powerup_spawn_timer = 0
+
+        rand = random.random()
+        if rand < 0.5:
+            powerup_type = 'speed'
+            powerup_spawn_interval = random.uniform(12.0, 18.0)
+        else:
+            powerup_type = 'instakill'
+            powerup_spawn_interval = 20.0
+
+        max_attempts = 20
+        for attempt in range(max_attempts):
+            angle = random.uniform(0, 2 * math.pi)
+            distance = random.uniform(150, 450)
+            x = math.cos(angle) * distance
+            y = math.sin(angle) * distance
+
+            valid_position = True
+
+            for existing in powerups:
+                dx = x - existing.x
+                dy = y - existing.y
+                distance_to_existing = math.sqrt(dx*dx + dy*dy)
+                if distance_to_existing < 100:
+                    valid_position = False
+                    break
+
+            if player and valid_position:
+                dx = x - player.x
+                dy = y - player.y
+                if math.sqrt(dx*dx + dy*dy) < 80:
+                    valid_position = False
+
+            if statue and valid_position:
+                dx = x - statue.x
+                dy = y - statue.y
+                distance_to_statue = math.sqrt(dx*dx + dy*dy)
+                if distance_to_statue < 100:
+                    valid_position = False
+
+            if fence and fence.alive and valid_position:
+                dx = x - fence.center_x
+                dy = y - fence.center_y
+                distance_to_fence_center = math.sqrt(dx*dx + dy*dy)
+                if distance_to_fence_center < fence.radius + 50:
+                    valid_position = False
+
+            arena_size = 900
+            if valid_position:
+                if abs(x) > arena.length - 100 or abs(y) > arena.length - 100:
+                    valid_position = False
+
+            if valid_position:
+                new_powerup = PowerUp(x, y, powerup_type)
+                powerups.append(new_powerup)
+                print(f"Power-up spawned: {powerup_type.upper()} at ({int(x)}, {int(y)})")
+                break
+
+    for powerup in powerups[:]:
+        powerup.update(delta_time)
+
+        if player and powerup.alive and powerup.check_collision(player.x, player.y):
+            if powerup.type == 'speed':
+                player.collect_speed_boost()
+            elif powerup.type == 'instakill':
+                player.collect_instakill()
+
+            powerup.alive = False
+            powerups.remove(powerup)
+
+    for barrier in barriers[:]:
+        if not barrier.alive:
+            barriers.remove(barrier)
+
+    for spike in spikes[:]:
+        spike.update(delta_time, monsters)
+    for bomb in bombs[:]:
+        bomb.update(delta_time, monsters)
+        if not bomb.alive:
+            bombs.remove(bomb)
+
+    for monster in monsters:
+        if monster.alive and not monster.is_dying:
+            for barrier in barriers[:]:
+                if not barrier.alive:
+                    continue
+
+                dx = monster.x - barrier.x
+                dy = monster.y - barrier.y
+                distance = math.sqrt(dx*dx + dy*dy)
+
+                if distance < (monster.size * 2 + barrier.width/2):
+                    if hasattr(monster, 'animation_time'):
+                        if not hasattr(monster, 'last_barrier_attack'):
+                            monster.last_barrier_attack = {}
+
+                        barrier_id = id(barrier)
+                        if barrier_id not in monster.last_barrier_attack:
+                            monster.last_barrier_attack[barrier_id] = 0
+
+                        if monster.animation_time - monster.last_barrier_attack[barrier_id] >= 1.0:
+                            barrier.take_damage(10)
+                            monster.last_barrier_attack[barrier_id] = monster.animation_time
+
+    if arena:
+        arena.update(delta_time)
+    if statue:
+        statue.update(delta_time)
+        if statue.health <= 0:
+            game_over = True
+
+    glutPostRedisplay()
+
+
+def specialKeyListener(key, x, y):
+    global camera_angle, camera_distance
+    if key == GLUT_KEY_LEFT:
+        camera_angle = (camera_angle - 5) % 360
+    elif key == GLUT_KEY_RIGHT:
+        camera_angle = (camera_angle + 5) % 360
+    elif key == GLUT_KEY_UP:
+        camera_distance = min(1500, camera_distance + 20)
+    elif key == GLUT_KEY_DOWN:
+        camera_distance = max(300, camera_distance - 20)
+    glutPostRedisplay()
+
+def keyboardListener(key, x, y):
+    global arena, statue, spawn_interval, monsters, game_over, player, first_person_mode, game_won
+    global game_timer, game_paused
+    global sudden_death_active, boss_spawn_timer, game_paused
+    if game_paused and key not in [b' ', b'r', b'R']:
+        return
+
+    if key == b'p' or key == b'P':
+        monsters.clear()
+        powerups.clear()
+        companions.clear()
+        barriers.clear()
+        spikes.clear()
+        bombs.clear()
+
+        game_timer = 180.0
+
+        sudden_death_active = False
+        boss_spawn_timer = 0
+
+        statue.health = statue.max_health
+        statue.shield_active = False
+        statue.shield_health = 0
+        statue.set_state('normal')
+        arena.set_state('normal')
+
+        arena.deactivate_warning_zone('top')
+        arena.deactivate_warning_zone('bottom')
+        arena.deactivate_warning_zone('left')
+        arena.deactivate_warning_zone('right')
+
+        player.x = 0
+        player.y = -400
+        player.angle = 0
+        player.bullets.clear()
+        player.health = player.max_health
+        player.xp = 0
+        player.bullet_damage = 70
+        player.damage_boost = 0
+        player.speed_boost_timer = 0
+        player.has_speed_boost = False
+        player.speed_boost_active = False
+        player.instakill_active = False
+        player.instakill_timer = 0
+
+        if fence:
+            fence.health = fence.max_health
+            fence.alive = True
+
+        if horse:
+            horse.x = 0
+            horse.y = -450
+            horse.heal_cooldown = 0
+            horse.alive = True
+
+        if hasattr(player, 'transfer_effect_timer'):
+            player.transfer_effect_timer = 0
+            player.transfer_target = None
+
+        game_over = False
+        game_won = False
+        timer_paused = False
+
+        print("Game Reset!")
+
+    elif key == b'y' or key == b'Y':
+        if not game_over and not game_won:
+                if len(companions) >= MAX_COMPANIONS:
+                    print(f"Companion limit reached! Maximum {MAX_COMPANIONS} companions allowed.")
+                    return
+
+                angle = random.uniform(0, 2 * math.pi)
+                distance = 100
+                spawn_x = statue.x + math.cos(angle) * distance
+                spawn_y = statue.y + math.sin(angle) * distance
+
+                new_companion = Companion(spawn_x, spawn_y, z=50)
+                companions.append(new_companion)
+                print(f"Companion spawned! ({len(companions)}/{MAX_COMPANIONS}) Duration: 10s")
+
+    elif key == b' ':
+        game_paused = not game_paused
+        if game_paused:
+            print("Game PAUSED")
+        else:
+            print("Game RESUMED")
+        glutPostRedisplay()
+        return
+
+    elif key == b'x' or key == b'X':
+        if player and statue:
+            player.activate_statue_shield(statue)
+
+    elif key == b'w' or key == b'W':
+        rad = math.radians(player.angle + 90)
+        player.move(math.cos(rad), math.sin(rad),statue=statue)
+    elif key == b's' or key == b'S':
+        rad = math.radians(player.angle + 90)
+        player.move(-math.cos(rad), -math.sin(rad),statue=statue)
+
+    elif key == b'a' or key == b'A':
+        rad = math.radians(player.angle + 90)
+        player.move(-math.sin(rad), math.cos(rad), statue=statue)
+
+    elif key == b'd' or key == b'D':
+        rad = math.radians(player.angle + 90)
+        player.move(math.sin(rad), -math.cos(rad), statue=statue)
+
+    elif key == b'q' or key == b'Q':
+        player.rotate(5)
+
+    elif key == b'e' or key == b'E':
+        player.rotate(-5)
+
+    elif key == b'1':
+        if player and not game_over and not game_won:
+            rad = math.radians(player.angle + 90)
+            distance = 80
+            x = player.x + math.cos(rad) * distance
+            y = player.y + math.sin(rad) * distance
+
+            new_barrier = Barrier(x, y)
+            barriers.append(new_barrier)
+            print(f"Barrier placed at ({int(x)}, {int(y)})")
+
+    elif key == b'2':
+        if player and not game_over and not game_won:
+            rad = math.radians(player.angle + 90)
+            distance = 80
+            x = player.x + math.cos(rad) * distance
+            y = player.y + math.sin(rad) * distance
+
+            new_spike = Spike(x, y)
+            spikes.append(new_spike)
+            print(f"Spikes placed at ({int(x)}, {int(y)})")
+
+    elif key == b'3':
+        if player and not game_over and not game_won:
+            rad = math.radians(player.angle + 90)
+            distance = 80
+            x = player.x + math.cos(rad) * distance
+            y = player.y + math.sin(rad) * distance
+
+            new_bomb = Bomb(x, y)
+            bombs.append(new_bomb)
+            print(f"Bomb placed at ({int(x)}, {int(y)}) - Explodes in 3 seconds!")
+
+    elif key == b'f' or key == b'F':
+        first_person_mode = not first_person_mode
+        if first_person_mode:
+            print("First-Person Mode: ON")
+        else:
+            print("Third-Person Mode: ON")
+
+    glutPostRedisplay()
+
+def mouseListener(button, state, x, y):
+    global player
+
+    if button == GLUT_LEFT_BUTTON and state == GLUT_DOWN:
+        if player:
+            player.shoot()
+
+    glutPostRedisplay()
+
+def main():
+    global arena, statue, monsters, spawn_timer, player, fence,horse
+    last_time = time.time()
+    monsters = []
+    spawn_timer = 0
+
+    glutInit()
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH)
+    glutInitWindowSize(1000, 800)
+    glutInitWindowPosition(0, 0)
+    glutCreateWindow(b"Tower Defense - Guardian's Arena")
+
+
+
+    arena = Arena(length=600)
+    statue = Statue(0, 0, 50, scale=0.5)
+    fence = Fence(center_x=0, center_y=0, radius=120, num_posts=16)
+    player = Player(x=0, y=-400)
+    horse = HorseCompanion(player_ref=player)
+
+    glutDisplayFunc(showScreen)
+    glutSpecialFunc(specialKeyListener)
+    glutKeyboardFunc(keyboardListener)
+    glutMouseFunc(mouseListener)
+    glutIdleFunc(update)
+
+    glutMainLoop()
+
+if __name__ == "__main__":
+    main()
